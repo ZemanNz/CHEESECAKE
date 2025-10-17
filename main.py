@@ -1,6 +1,30 @@
 import cv2  # Import the OpenCV library 
 from ultralytics import YOLO  # Import the YOLO class from the Ultralytics library
 import numpy as np  # Import NumPy for numerical operationse
+import serial  # Import the pyserial library for serial communication
+import time  # Import the time library for sleep functionality
+
+
+def ComunictionSetup():
+    port = '/dev/cu.usbmodem101' # port pro komunikaci s Raspberry Pi /dev/ttyACM0
+    baund_rate = 115200 # rychlost komunikace
+    ser = serial.Serial(port,baund_rate,timeout=1)
+    time.sleep(2)
+    ser.reset_input_buffer()
+    print("serial comunication setup done")
+    return ser
+
+def SendData(data):
+    command = f"{data}\n"
+    ser.write(command.encode('utf-8'))
+    print('data send')
+
+def waitForResponse():
+    while True:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').strip()
+            return line
+        
 
 # Function to set up the camera
 def CameraSetup():
@@ -63,6 +87,8 @@ def px_to_cm_x_offset(offset_px, distance_cm, frame_width=960, fov_deg=45):
 
 
 # Main execution
+#ser = ComunictionSetup()  # Set up serial communication
+
 
 model = LoadModel()  # Load the YOLOv11 model
 # Example usage
