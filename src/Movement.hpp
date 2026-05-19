@@ -156,21 +156,49 @@ void TurnLeft(int angle)
 }
 
 void BackwardUntillWall(){
-  while (man.buttons().left() == 0 || man.buttons().right() == 0) //left je opravdu leve tlaitko
-  { //(ticks_M2 < distance)&& (ticks_M3 < distance)
-    if(man.buttons().left() == 1){
+  unsigned long start_time = millis();
+  bool first_hit = false;
+  unsigned long hit_time = 0;
+
+  while (man.buttons().left() == 0 || man.buttons().right() == 0)
+  {
+    bool left_pressed = (man.buttons().left() == 1);
+    bool right_pressed = (man.buttons().right() == 1);
+
+    if (left_pressed || right_pressed) {
+      if (!first_hit) {
+        first_hit = true;
+        hit_time = millis();
+        Serial.println("[TLACITKA] Detekován první náraz! Zkracuji čas na srovnání na 2 sekundy.");
+      }
+    }
+
+    // Vyhodnocení timeoutu
+    if (first_hit) {
+      if (millis() - hit_time >= 2000) {
+        Serial.println("[TLACITKA] Srovnání vypršelo (limit 2 sekundy od prvního nárazu). Končím.");
+        break;
+      }
+    } else {
+      if (millis() - start_time >= 5000) {
+        Serial.println("[TLACITKA] Hledání stěny vypršelo (limit 5 sekund). Končím.");
+        break;
+      }
+    }
+
+    if (left_pressed) {
       man.motor(rb::MotorId::M3).speed(-3000);
       man.motor(rb::MotorId::M2).speed(1000);
     }
-    else if(man.buttons().right() == 1){
+    else if (right_pressed) {
       man.motor(rb::MotorId::M2).speed(3000);
       man.motor(rb::MotorId::M3).speed(-1000);  
     }
-    else{
-    man.motor(rb::MotorId::M2).speed(2500);
-    man.motor(rb::MotorId::M3).speed(-2500);
-    delay(10);
+    else {
+      man.motor(rb::MotorId::M2).speed(2500);
+      man.motor(rb::MotorId::M3).speed(-2500);
     }
+    delay(10); // Odlehčení procesoru v každém průchodu smyčky
   }
   man.motor(rb::MotorId::M2).speed(0);
   man.motor(rb::MotorId::M3).speed(0);

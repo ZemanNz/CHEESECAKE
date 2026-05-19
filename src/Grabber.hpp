@@ -2,9 +2,11 @@
 #include "RBCX.h"
 #include<Arduino.h>
 
+#include <memory>
+
 //pro spravne fungovani SmartServoBus.hpp
 using namespace lx16a;
-static SmartServoBus servoBus;
+extern std::unique_ptr<SmartServoBus> servoBus;
 
 
 
@@ -29,43 +31,46 @@ struct Grabber
     grabber_state last_state = closed;//vychozi stav je zavreno
     //nastavy grabber na open pozici
     void Open(){
+        if (!servoBus) return;
         if(last_state == closed){
-            servoBus.set(0, 0_deg);
+            servoBus->set(0, 0_deg);
             delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
-            servoBus.set(1, RightAngle(0_deg));
+            servoBus->set(1, RightAngle(0_deg));
         }
         else{//grab
-            servoBus.set(0, 0_deg); 
-            servoBus.set(1, RightAngle(0_deg)); 
+            servoBus->set(0, 0_deg); 
+            servoBus->set(1, RightAngle(0_deg)); 
         }
         last_state = open;
     }
     //nastavy grabber na close pozici
     void Close(){
+        if (!servoBus) return;
         if(last_state == open){
-            servoBus.set(1, RightAngle(140_deg)); 
+            servoBus->set(1, RightAngle(140_deg)); 
             delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
-            servoBus.set(0, 145_deg); 
+            servoBus->set(0, 145_deg); 
         }
         else{//grab
-            servoBus.set(0, 50_deg); 
+            servoBus->set(0, 50_deg); 
             delay(1000);
-            servoBus.set(1, RightAngle(140_deg));
+            servoBus->set(1, RightAngle(140_deg));
             delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
-            servoBus.set(0, 145_deg); 
+            servoBus->set(0, 145_deg); 
         }
         last_state = closed;
     }
     //nastavy grabber na grab pozici
     void Grab(){
+        if (!servoBus) return;
         if(last_state == open){
-            servoBus.set(0, 80_deg);
-            servoBus.set(1, RightAngle(75_deg)); 
+            servoBus->set(0, 80_deg);
+            servoBus->set(1, RightAngle(75_deg)); 
         }
         else{//close
-            servoBus.set(0, 80_deg); 
-    delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
-    servoBus.set(1, RightAngle(75_deg)); 
+            servoBus->set(0, 80_deg); 
+            delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
+            servoBus->set(1, RightAngle(75_deg)); 
         }
         last_state = grab;
     }
