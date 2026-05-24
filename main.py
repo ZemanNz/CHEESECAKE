@@ -112,75 +112,120 @@ def px_to_cm_x_offset(offset_px, distance_cm, frame_width=960, fov_deg=45):
     return cm_offset
 
 
+# Globální proměnná pro stav spuštění
+started = False
+
+def click_event(event, x, y, flags, param):
+    global started
+    if event == cv2.EVENT_LBUTTONDOWN:
+        # Pokud uživatel klikne do obdélníku START tlačítka (x: 20-170, y: 20-70)
+        if 20 <= x <= 170 and 20 <= y <= 70:
+            started = True
+            print("[RPi MAIN] Tlacitko START stisknuto! Nyni cekam na 'inposition' z robota.")
+
 # Main execution
 ser = ComunictionSetup()  # Set up serial communication
 
-
 model = LoadModel()  # Load the YOLOv11 model
-# Example usage
 cap = CameraSetup()       # Initialize the camera
 
-while True:
-    # Kontrola, zda nepřišla zpráva z robota
-    if ser.in_waiting > 0:
-        try:
-            line = ser.readline().decode('utf-8').strip()
-            if line:
-                print(f"[RPi UART RX] Přijato od robota: '{line}'")
-        except Exception as e:
-            print(f"[RPi UART RX] Chyba při čtení: {e}")
+cv2.namedWindow('image')
+cv2.setMouseCallback('image', click_event)
 
+waiting_for_robot = True
+print("[RPi MAIN] RPi je pripraveno. Klikni na tlacitko START v okne kamery.")
+
+last_detect_time = 0
+last_bear_data = None
+
+while True:
     image = GetImage(cap)        # Capture a frame
     if image is None:
         print("[RPi Video] Čekám na obraz z kamery...")
         time.sleep(1)
         continue
 
-    # Run detection on the input image
-    result = GetResult(model, image)
-    bear_data = ObtainData(result)
-    if bear_data is not None:
-        x, y, w, h = bear_data  # Extract bounding box data
+    # Zpracování UARTu pouze pokud jsme odstartovali
+    if started and ser.in_waiting > 0:
+        try:
+            line = ser.readline().decode('utf-8').strip()
+            if line:
+                print(f"[RPi UART RX] Přijato od robota: '{line}'")
+                if "inposition" in line:
+                    waiting_for_robot = False
+                    print("\n[RPi MAIN] --- ROBOT JE NA MISTE ---")
+                    print("[RPi MAIN] Zacinam vyhodnocovat snimky naplno (max FPS)...")
+                    # Vymazání fronty pro čistý snímek
+                    for _ in range(5):
+                        cap.read()
+        except Exception as e:
+            print(f"[RPi UART RX] Chyba při čtení: {e}")
+            
+    elif not started and ser.in_waiting > 0:
+        # Před startem zahazujeme balast ze seriové linky
+        ser.reset_input_buffer()
 
-        # Calculate relative position from the center of the image
-        relative_x = x - 480  # Calculate relative x position from center
-        relative_y_bottom = 690 - (y + round(h/2)) # Calculate relative y position from bottom center
-        print(f"[RPi YOLO] Detekován medvěd. Relativní pozice: x={relative_x}, y_bottom={relative_y_bottom}")  # Print relative position
+    # Logika spouštění YOLO
+    is_active_mode = started and not waiting_for_robot
+    should_detect = is_active_mode or (time.time() - last_detect_time > 2.0)
+    
+    if should_detect:
+        result = GetResult(model, image)
+        last_bear_data = ObtainData(result)
+        last_detect_time = time.time()
+
+    # Vykreslování výsledků detekce (aby obraz neblikal, vykreslujeme vzdy i posledni znama data)
+    x_cm_out, y_cm_out = None, None
+    if last_bear_data is not None:
+        x, y, w, h = last_bear_data
+        relative_x = x - 480
+        relative_y_bottom = 690 - (y + round(h/2))
         y_cm = 0.07895052 * np.e**(0.02147171 * relative_y_bottom) + 35.468015
-
-        # Convert pixel offset to cm offset    
         x_cm = px_to_cm_x_offset(relative_x, y_cm)
-        print(f"[RPi YOLO] Vypočtená vzdálenost: x={x_cm:.2f} cm, y={y_cm:.2f} cm")
+        x_cm_out, y_cm_out = x_cm, y_cm
         
-        # Draw bounding box and center point on the image
-        cv2.circle(image, (x, y + round(h/2)), 5, (255, 0, 255), -1)  # Draw center point
-        cv2.rectangle(image, (x - round(w/2), y - round(h/2)), (x + round(w/2), y + round(h/2)), (0, 255, 0), 2)  # Draw bounding box
-        cv2.line(image, (x, 0), (x, 640), (0, 0, 255), 1)  # Draw vertical line
-        cv2.line(image, (0, y + round(h/2)), (960, y + round(h/2)), (0, 0, 255), 1)  # Draw horizontal line
-        cv2.line(image, (480, 0), (480, 640), (255, 0, 0), 1)  # Draw center vertical line
-        cv2.line(image, (0, 320), (960, 320), (255, 0, 0), 1)  # Draw center horizontal line
+        # Zeleny ramecek kolem medveda
+        cv2.circle(image, (x, y + round(h/2)), 5, (255, 0, 255), -1)
+        cv2.rectangle(image, (x - round(w/2), y - round(h/2)), (x + round(w/2), y + round(h/2)), (0, 255, 0), 2)
+        cv2.line(image, (x, 0), (x, 640), (0, 0, 255), 1)
+        cv2.line(image, (0, y + round(h/2)), (960, y + round(h/2)), (0, 0, 255), 1)
+        cv2.line(image, (480, 0), (480, 640), (255, 0, 0), 1)
+        cv2.line(image, (0, 320), (960, 320), (255, 0, 0), 1)
 
-
-        # Display x_cm and y_cm in the bottom right corner
+        # Text s vypoctenou vzdalenosti vpravo dole
         text = f"X distance: {x_cm:.1f}, Y distance: {y_cm:.1f}"
         font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
-        text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
-        text_x = image.shape[1] - text_size[0] - 50
-        text_y = image.shape[0] - 50
-        cv2.putText(image, text, (text_x, text_y), font, font_scale, (0,255,255), thickness)
-        
-        # Send data over UART
-        SendData(ser, x=x_cm, y=y_cm, camera=True, on=True, angle=0, distance=int(y_cm*10), max_distance=1300)
+        text_size, _ = cv2.getTextSize(text, font, 0.7, 2)
+        cv2.putText(image, text, (image.shape[1] - text_size[0] - 50, image.shape[0] - 50), font, 0.7, (0,255,255), 2)
+
+    # Vykreslování stavového UI (semafor) vlevo nahore
+    if not started:
+        cv2.rectangle(image, (20, 20), (170, 70), (0, 0, 255), -1)
+        cv2.putText(image, "START", (40, 55), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(image, "Cekam na START...", (200, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+    elif waiting_for_robot:
+        cv2.circle(image, (50, 50), 20, (0, 165, 255), -1)
+        cv2.putText(image, "Ceka na RBCX ('inposition')...", (90, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 2)
     else:
-        print("[RPi YOLO] Nebyl detekován žádný medvěd.")
-    
-    
-    
-    # Print bounding box data
-    ShowImage(image)# Display the frame
-    if cv2.waitKey(1) & 0xFF == ord('q'):  # Exit loop if 'q' is pressed
+        cv2.circle(image, (50, 50), 20, (255, 0, 255), -1)
+        cv2.putText(image, "DETEKCE AKTIVNI - Hledam medveda!", (90, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+
+    # Odesílání dat, POUZE pokud jsme v aktivním režimu a POUZE pokud máme čerstvě spočítanou detekci
+    if is_active_mode and should_detect:
+        if last_bear_data is not None:
+            # Převod na milimetry pro odeslání
+            x_mm = int(x_cm_out * 10)
+            y_mm = int(y_cm_out * 10)
+            print(f"[RPi YOLO] Detekován medvěd. Vypočtená vzdálenost: x={x_cm_out:.2f} cm, y={y_cm_out:.2f} cm")
+            SendData(ser, x=x_mm, y=y_mm, camera=True, on=True, angle=0, distance=y_mm, max_distance=1300)
+            print("[RPi MAIN] Data odeslana. Prechazim zpet do rezimu cekani (oranzova).")
+            waiting_for_robot = True
+        else:
+            print("[RPi YOLO] Nebyl detekován žádný medvěd. Zkousim dalsi snimek...")
+
+    ShowImage(image)
+    if cv2.waitKey(1) & 0xFF == ord('q'):
         break
-cap.release()  # Release the camera
-cv2.destroyAllWindows()  # Close all OpenCV windows
+
+cap.release()
+cv2.destroyAllWindows()

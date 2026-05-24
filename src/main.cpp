@@ -220,6 +220,54 @@ void OpenGrabberBeforeField(){
   grabber.HalfOpen();
 }
 
+// Funkce pro plynulé vyhledávání medvěda (otáčení doleva s dynamickým zpomalováním a návratem)
+void FindBearLeft() {
+  float search_speed = 6.0f; // Počáteční rychlost hledání (v procentech)
+  float min_speed = 4.0f;    // Minimální rychlost, aby se robot vůbec hýbal
+  
+  Serial.println("[MAIN] Zacinam plynule vyhledavani medveda (otaceni doleva)...");
+
+  // Pro otáčení DOLEVA musí levý motor couvat (kladná hodnota) a pravý jet dopředu (kladná hodnota)
+  man.motor(motors.m_id_left).speed(motors.pctToSpeed(search_speed));
+  man.motor(motors.m_id_right).speed(motors.pctToSpeed(search_speed));
+  
+  while(true) {
+      message.SendInPosstionMessage();
+      message.WaitingForBearPosData(); // Zde se sekne, dokud medved neni v zaberu
+      
+      // Hodnota x_distance odteď chodí z Raspberry Pi v MILIMETRECH
+      int x = message.x_distance;
+      
+      // Zkontrolujeme, jestli je medved uprostred s velmi malou toleranci +- 6 mm
+      if (x >= -6 && x <= 6) {
+          Serial.println("[MAIN] Medved je presne pred nami (X je blizko 0)! Zastavuji otaceni.");
+          man.motor(motors.m_id_left).speed(0);
+          man.motor(motors.m_id_right).speed(0);
+          break;
+      }
+      
+      // Vypocet plynuleho zpomaleni (max X je zhruba 300 mm od stredu)
+      float current_speed = (abs(x) / 300.0f) * search_speed;
+      if (current_speed < min_speed) current_speed = min_speed;
+      if (current_speed > search_speed) current_speed = search_speed;
+      
+      // Pokud je x > 6, prelozili jsme ho a medved je nyni napravo od robota. Musime se otocit zpet DOPRAVA!
+      if (x > 6) {
+          Serial.printf("[MAIN] Prejeli jsme! x=%d mm. Menim smer, tocim se DOPRAVA rychlosti %.1f %%\n", x, current_speed);
+          // Pro otaceni DOPRAVA dame zapornou hodnotu do obou motoru
+          man.motor(motors.m_id_left).speed(motors.pctToSpeed(-current_speed));
+          man.motor(motors.m_id_right).speed(motors.pctToSpeed(-current_speed));
+      } 
+      // Jinak jsme medveda jeste nedotahli do stredu, nebo je nalevo. Tocime se stale DOLEVA.
+      else {
+          Serial.printf("[MAIN] Srovnavam: x=%d mm, tocim DOLEVA rychlosti %.1f %%\n", x, current_speed);
+          // Pro otaceni DOLEVA dame kladnou hodnotu do obou motoru
+          man.motor(motors.m_id_left).speed(motors.pctToSpeed(current_speed));
+          man.motor(motors.m_id_right).speed(motors.pctToSpeed(current_speed));
+      }
+  }
+}
+
 void setup()
 {
   Serial.begin(115200);
@@ -263,16 +311,33 @@ void setup()
   Serial.println("[KLEPETA] Nastavuji klepeta do přípravné polohy (HalfOpen) před zahájením detekce...");
   grabber.HalfOpen();
 
-  Serial.println("[MAIN] Zadam RPi o polohu medveda...");
-  message.SendInPosstionMessage();
-  message.WaitingForBearPosData();
-  Serial.println("[MAIN] Data prijata, neukoncuji komunikaci, neni potreba.");
+  Serial.println("[MAIN] Čekám 1 vteřinu na ustálení robota před hledáním medvěda...");
+  delay(1000);
 
-  // Podrobné výpisy souřadnic
-  Serial.printf("[MAIN] Přijaté souřadnice z RPi: x_dist = %d, y_dist = %d\n", message.x_distance, message.y_distance);
-  Serial.printf("[MAIN] Vzdálenost k medvědovi: %d cm, úhel: %d stupňů\n", message.msg.distance / 10, message.msg.angle);
-  Serial.printf("[MAIN] Jedeme pro medvěda na souřadnice: x=%d, y=%d...\n", message.x_distance, message.y_distance);
+  // Spuštění plynulého vyhledávání medvěda
+  FindBearLeft();
+
+  // Rozsvítit MODROU (a pro jistotu i zelenou) LED pro indikaci nalezení cíle
+  // Poznamka: Pokud by modrá LED zlobila (jak jsi zmiňoval), uvidíš aspoň zelenou
+  man.leds().blue(true);
+  man.leds().green(true);
+
+  // Podrobné výpisy souřadnic po srovnání
+  Serial.printf("[MAIN] Konečné souřadnice k medvědovi po srovnání: x=%d, y=%d...\n", message.x_distance, message.y_distance);
   
+  Serial.println("[MAIN] ČEKÁM NA STISKNUTÍ TLAČÍTKA UP (horní) pro zahájení lovu medvěda...");
+  while(true){
+    if (man.buttons().up() == 1) {
+      Serial.println("[TLACITKA] Tlacitko UP stisknuto! Vyrazime.");
+      break;
+    }
+    delay(10);
+  }
+  
+  // Zhasnout diody před jízdou
+  man.leds().blue(false);
+  man.leds().green(false);
+
   Serial.println("[KLEPETA] Otevírám klepeta naplno (Open) a vyrážím za medvědem!");
   grabber.Open();
   
