@@ -1,0 +1,78 @@
+#include <Arduino.h>
+#include "RBCX.h"
+#include "Grabber.hpp"
+
+// Nutné definovat globálně pro Grabber.hpp
+std::unique_ptr<SmartServoBus> servoBus;
+
+auto &man = rb::Manager::get();
+Grabber grabber;
+
+// Pomocné proměnné pro detekci změny stavu tlačítka (aby to nevypisovalo milionkrát za sekundu)
+bool btn_left_pressed = false;
+bool btn_right_pressed = false;
+
+void setup() {
+    Serial.begin(115200);
+    delay(500);
+
+    Serial.println("\n==========================================");
+    Serial.println("[TEST] Program pro test chytrých serv a zadních tlačítek.");
+    
+    man.install();
+
+    // SPRAVNA INICIALIZACE SERV (přes STM koprocesor na desce RBCX)
+    // Tímto se zcela vyhneme konfliktu s ESP32 UARTy (jako je Serial1 pro RPi),
+    // protože komunikaci s chytrými servy obstará přímo koprocesor na základní desce!
+    Serial.println("[SERVOS] Inicializuji SmartServoBus pres STM koprocesor...");
+    servoBus = std::make_unique<SmartServoBus>();
+    servoBus->begin(2, &man.smartServoBusBackend());
+    Serial.println("[SERVOS] Chytra serva inicializována uspesne.");
+
+    Serial.println("\nOvladani:");
+    Serial.println(" - Zmackni ZADNI LEVE tlacitko (left)  -> Otevre uplne (Open)");
+    Serial.println(" - Zmackni ZADNI PRAVE tlacitko (right) -> Zavre uplne (Close)");
+    Serial.println(" - Zmackni HORNI TLACITKO ON           -> Uchopi medveda (Grab)");
+    Serial.println("==========================================\n");
+}
+
+void loop() {
+    // Aktuální stav zadních tlačítek
+    bool left = man.buttons().left();
+    bool right = man.buttons().right();
+
+    // --- LEVE TLACITKO ---
+    if (left && !btn_left_pressed) {
+        Serial.println("[TLACITKO] Leve zadni ZMACNUTO -> Volam grabber.Open()");
+        grabber.Open();
+        btn_left_pressed = true;
+    } else if (!left && btn_left_pressed) {
+        Serial.println("[TLACITKO] Leve zadni PUSTENO.");
+        btn_left_pressed = false;
+    }
+
+    // --- PRAVE TLACITKO ---
+    if (right && !btn_right_pressed) {
+        Serial.println("[TLACITKO] Prave zadni ZMACNUTO -> Volam grabber.Close()");
+        grabber.Close();
+        btn_right_pressed = true;
+    } else if (!right && btn_right_pressed) {
+        Serial.println("[TLACITKO] Prave zadni PUSTENO.");
+        btn_right_pressed = false;
+    }
+
+    // --- ON TLACITKO ---
+    bool on_btn = man.buttons().on();
+    static bool btn_on_pressed = false;
+
+    if (on_btn && !btn_on_pressed) {
+        Serial.println("[TLACITKO] Tlacitko ON ZMACNUTO -> Volam grabber.Grab() (Uchopeni medveda)");
+        grabber.Grab();
+        btn_on_pressed = true;
+    } else if (!on_btn && btn_on_pressed) {
+        Serial.println("[TLACITKO] Tlacitko ON PUSTENO.");
+        btn_on_pressed = false;
+    }
+
+    delay(20);
+}

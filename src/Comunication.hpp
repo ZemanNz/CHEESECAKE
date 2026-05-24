@@ -6,8 +6,8 @@
 #define ESP32P4_SYNC1 0x55
 
 typedef struct __attribute__((packed)) {
-    uint16_t x;
-    uint16_t y;
+    int16_t x;
+    int16_t y;
     bool camera;
     bool on;
     int16_t angle;
@@ -76,10 +76,11 @@ struct Communication {
                         // Use received data
                         x_distance = msg.x;
                         y_distance = msg.y;
-                        Serial.printf("[RPi UART RX] Přijat paket: x_dist=%d, y_dist=%d, dist=%d, camera=%d, on=%d, angle=%d\n", 
-                                      msg.x, msg.y, msg.distance, msg.camera, msg.on, msg.angle);
+                        
+                        // Zjednoduseny hezky vypis pouze X a Y pozice
+                        Serial.printf("🎯 Medved detekovan: X = %d mm | Y = %d mm\n", x_distance, y_distance);
                     } else {
-                        Serial.printf("[RPi UART RX] Chyba kontrolního součtu! (přijato 0x%02X, očekáváno 0x%02X)\n", c, checksum);
+                        Serial.printf("❌ [RPi] Chyba dat!\n");
                     }
                     state = WAIT_SYNC0;
                     break;

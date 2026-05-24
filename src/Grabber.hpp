@@ -25,7 +25,8 @@ struct Grabber
         {
             closed,
             open,
-            grab
+            grab,
+            half_open
         };
 
     grabber_state last_state = closed;//vychozi stav je zavreno
@@ -64,15 +65,28 @@ struct Grabber
     void Grab(){
         if (!servoBus) return;
         if(last_state == open){
-            servoBus->set(0, 80_deg);
-            servoBus->set(1, RightAngle(75_deg)); 
+            servoBus->set(0, 86_deg);
+            servoBus->set(1, RightAngle(81_deg)); 
         }
         else{//close
-            servoBus->set(0, 80_deg); 
+            servoBus->set(0, 86_deg); 
             delay(1000);//nutna prodleva, aby nedoslo ke kolizi klepet pri otvirani
-            servoBus->set(1, RightAngle(75_deg)); 
+            servoBus->set(1, RightAngle(81_deg)); 
         }
         last_state = grab;
+    }
+    
+    //nastavi grabber na polovicni open pozici (o 45 stupnu mene nez full open)
+    void HalfOpen(){
+        if (!servoBus) return;
+        
+        servoBus->set(0, 45_deg);
+        if(last_state == closed){
+            delay(1000); // ochrana pri otevirani z uplneho zavreni
+        }
+        servoBus->set(1, RightAngle(45_deg)); 
+        
+        last_state = half_open;
     }
 };
 

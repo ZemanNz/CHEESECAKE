@@ -1,0 +1,83 @@
+#include "RBCX.h"
+#include <Arduino.h>
+#include "movement_my.hpp"
+
+// Pro fungování RBCX
+auto &man = rb::Manager::get(); 
+Motors motors;
+
+// Pomocná funkce pro objetí čtverce 1x1 metr (1000x1000 mm)
+void drive_square(bool cw, float speed) {
+  Serial.print("[TEST] Zahájení jízdy po čtverci: ");
+  Serial.println(cw ? "CW (po směru)" : "CCW (proti směru)");
+  
+  for (int i = 0; i < 4; ++i) {
+    Serial.print(" -> Segment ");
+    Serial.print(i + 1);
+    Serial.println("/4: rovně 1000 mm");
+    motors.forward_acc(1000, speed);
+    delay(500); // 0.5s pauza pro ustálení
+    
+    Serial.print(" -> Otočení ");
+    Serial.print(i + 1);
+    Serial.println("/4: 90 stupňů");
+    if (cw) {
+      motors.turn_on_spot_right(90, 20);
+    } else {
+      motors.turn_on_spot_left(90, 20);
+    }
+    delay(500); // 0.5s pauza pro ustálení
+  }
+  Serial.println("[TEST] Čtverec dokončen!");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("[TEST] Inicializace testovacího programu pohybu...");
+  
+  man.install();
+  
+  Serial.println("[TEST] Připraven. Stiskněte tlačítko na robotu pro provedení akce:");
+  Serial.println(" - ON tlačítko: Kalibrační čtverec CW (po směru, 1x1m, 50% rychlost)");
+  Serial.println(" - UP tlačítko: Kalibrační čtverec CCW (proti směru, 1x1m, 50% rychlost)");
+  Serial.println(" - PRAVÉ tlačítko: Jízda vpřed 1 metr (50% rychlost)");
+  Serial.println(" - LEVÉ tlačítko: Otočení na místě vpravo o 90° (50% rychlost)");
+}
+
+void loop() {
+  // Tlačítko ON - CW čtverec
+  if (man.buttons().on() == 1) {
+    Serial.println("[TEST] Stisknuto tlačítko ON. Čekám 1 sekundu...");
+    delay(1000);
+    drive_square(true, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // Tlačítko UP - CCW čtverec
+  else if (man.buttons().up() == 1) {
+    Serial.println("[TEST] Stisknuto tlačítko UP. Čekám 1 sekundu...");
+    delay(1000);
+    drive_square(false, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // PRAVÉ tlačítko - jízda vpřed
+  else if (man.buttons().right() == 1) {
+    Serial.println("[TEST] Stisknuto PRAVÉ tlačítko. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Jízda vpřed 1 metr (1000 mm, 50% rychlost)");
+    motors.forward(1000, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // LEVÉ tlačítko - otočení o 90°
+  else if (man.buttons().left() == 1) {
+    Serial.println("[TEST] Stisknuto LEVÉ tlačítko. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Otočení na místě vpravo o 90 stupňů (50% rychlost)");
+    motors.turn_on_spot_right(90, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+
+  delay(20);
+}

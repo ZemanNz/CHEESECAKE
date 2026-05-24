@@ -1,0 +1,60 @@
+#include "RBCX.h"
+#include <Arduino.h>
+#include "movement_my.hpp"
+
+// Pro fungování RBCX
+auto &man = rb::Manager::get(); 
+Motors motors;
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("[TEST] Inicializace testovacího programu pohybu...");
+  
+  man.install();
+  
+  Serial.println("[TEST] Připraven. Stiskněte tlačítko na robotu pro provedení akce:");
+  Serial.println(" - PRAVÉ tlačítko: Jízda vpřed 1 metr (po 1s prodlevě)");
+  Serial.println(" - LEVÉ tlačítko: Otočení na místě vpravo o 90° (po 1s prodlevě)");
+  Serial.println(" - Tlačítko UP: Radius vpravo (150mm, 90°, po 1s prodlevě)");
+  Serial.println(" - Tlačítko ON: Jízda vpřed s akcelerací 500 mm (po 1s prodlevě)");
+}
+
+void loop() {
+  // PRAVÉ tlačítko
+  if (man.buttons().right() == 1) {
+    Serial.println("[TEST] Stisknuto PRAVÉ tlačítko. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Jízda vpřed 1 metr (1000 mm, 60% rychlost)");
+    motors.forward(1000, 60);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // LEVÉ tlačítko
+  else if (man.buttons().left() == 1) {
+    Serial.println("[TEST] Stisknuto LEVÉ tlačítko. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Otočení na místě vpravo o 90 stupňů (50% rychlost)");
+    motors.turn_on_spot_right(90, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // Tlačítko UP
+  else if (man.buttons().up() == 1) {
+    Serial.println("[TEST] Stisknuto tlačítko UP. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Radius vpravo (radius 150mm, 90 stupňů, 50% rychlost)");
+    motors.radius_right(150, 90, 50);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+  
+  // Tlačítko ON
+  else if (man.buttons().on() == 1) {
+    Serial.println("[TEST] Stisknuto tlačítko ON. Čekám 1 sekundu...");
+    delay(1000);
+    Serial.println("[TEST] Akce: Jízda vpřed s akcelerací/decelerací (500 mm, 70% rychlost)");
+    motors.forward_acc(500, 70);
+    Serial.println("[TEST] Akce dokončena. Připraven na další stisknutí.");
+  }
+
+  delay(20);
+}

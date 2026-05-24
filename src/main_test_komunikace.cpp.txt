@@ -1,0 +1,46 @@
+#include <Arduino.h>
+#include "RBCX.h"
+#include "Comunication.hpp"
+
+auto &man = rb::Manager::get();
+Communication message;
+
+bool button_was_pressed = false;
+
+void setup() {
+    // 1. Nejprve zapnout Serial pro USB, protože RBCX deska ho může potřebovat pro logování při startu
+    Serial.begin(115200);
+    delay(500);
+    
+    Serial.println("\n==========================================");
+    Serial.println("[TEST] Program pro testovani komunikace startuje.");
+    
+    // 2. Inicializace robota - NUTNÉ, jinak deska RBCX okamžitě odpojí napájení baterky!
+    man.install();
+    
+    // 3. Zapnuti komunikace s RPi (zapne Serial1)
+    message.start();
+    
+    Serial.println("[TEST] Hotovo. Posloucham data z Raspberry Pi.");
+    Serial.println("[TEST] Prijate X a Y pozice medveda se zacnou vypisovat...");
+    Serial.println("[TEST] Zmacknutim tlacitka ON posles zpet 'inposition' povel.");
+    Serial.println("==========================================");
+}
+
+void loop() {
+    // Čtení a přesné uložení + výpis pozic X a Y (o tohle se stará upravený Comunication.hpp)
+    message.receiveMessage();
+    
+    // Povel pro odeslání 'inposition'
+    if (man.buttons().on() == 1) {
+        if (!button_was_pressed) {
+            button_was_pressed = true;
+            Serial.println("\n[TEST] Odesilam 'inposition' do RPi...");
+            message.SendInPosstionMessage();
+        }
+    } else {
+        button_was_pressed = false;
+    }
+    
+    delay(10);
+}
