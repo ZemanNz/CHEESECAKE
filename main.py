@@ -134,9 +134,9 @@ def click_event(event, x, y, flags, param):
 
 # === Konfigurace hybridního trackeru ===
 CROP_Y = 240         # Oříznutí horní části obrazu (nastaveno na 240 pro dolní polovinu ze 480 px)
-HSV_H_TOL = 15       # Tolerance Hue pro barevnou masku
-HSV_S_TOL = 60       # Tolerance Saturation
-HSV_V_TOL = 60       # Tolerance Value
+HSV_H_TOL = 20       # Tolerance Hue pro barevnou masku
+HSV_S_TOL = 75       # Tolerance Saturation
+HSV_V_TOL = 75       # Tolerance Value
 
 data_lock = threading.Lock()
 frame_lock = threading.Lock()
@@ -180,11 +180,11 @@ def detector_thread():
                 
                 # Získání průměrné HSV barvy medvěda z malého okolí středu v oříznutém snímku
                 hsv_cropped = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
-                r = 10
+                r = 2  # Menší 5x5 okolí pro zamezení průměrování různých barev medvěda a pozadí
                 x_lo = max(0, x_crop - r)
-                x_hi = min(640, x_crop + r)
+                x_hi = min(640, x_crop + r + 1)
                 y_lo = max(0, y_crop - r)
-                y_hi = min(480 - CROP_Y, y_crop + r)
+                y_hi = min(480 - CROP_Y, y_crop + r + 1)
                 
                 roi = hsv_cropped[y_lo:y_hi, x_lo:x_hi]
                 if roi.size > 0:
@@ -290,7 +290,7 @@ while True:
             A = cv2.contourArea(c)
             aspect_ratio = w_c / h_c if h_c != 0 else 0
             # Teddy bear je dost velký objekt
-            if A > 150 and 0.4 <= aspect_ratio <= 2.5:
+            if A > 80 and 0.4 <= aspect_ratio <= 2.5:  # Sníženo ze 150 pro citlivější detekci v dálce
                 if A > bestA:
                     M = cv2.moments(c)
                     if M['m00'] > 0:
@@ -309,9 +309,9 @@ while True:
             with data_lock:
                 hsv_bear_data = hsv_bear_data_local
         else:
-            # Barevný tracking ztratil cíl, vypneme barevný režim a počkáme na YOLO
+            # Barevný tracking ztratil cíl, ale barevný režim nevypínáme okamžitě
+            # (pouze vynulujeme hsv data a necháme běžet dál, dokud YOLO nepotvrdí ztrátu)
             with data_lock:
-                have_color = False
                 hsv_bear_data = None
 
     # Určení finálních dat medvěda pro tento snímek
