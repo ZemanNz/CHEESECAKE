@@ -39,6 +39,19 @@ struct Communication {
         Serial.println("[RPi UART] Serial1 spuštěn.");
     }
 
+    void clearRxBuffer() {
+        Serial.println("[RPi UART] Promazávám Serial1 RX buffer...");
+        while (Serial1.available()) {
+            Serial1.read();
+        }
+        state = WAIT_SYNC0;
+        idx = 0;
+        checksum = 0;
+        memset(&msg, 0, sizeof(msg));
+        x_distance = 0;
+        y_distance = 0;
+    }
+
     void end() {
         Serial.println("[RPi UART] Ukončuji Serial1...");
         Serial1.end();

@@ -220,50 +220,91 @@ void OpenGrabberBeforeField(){
   grabber.HalfOpen();
 }
 
-// Funkce pro plynulé vyhledávání medvěda (otáčení doleva s dynamickým zpomalováním a návratem)
+// Funkce pro plynulé vyhledávání medvěda (s potlačením šumu, zvýšenou tolerancí a krokovým srovnáváním u cíle)
 void FindBearLeft() {
   float search_speed = 6.0f; // Počáteční rychlost hledání (v procentech)
-  float min_speed = 4.0f;    // Minimální rychlost, aby se robot vůbec hýbal
+  float min_speed = 4.0f;    // Rychlost jemných kroků (v procentech) - zvýšeno na 4.0 %
+  int centered_consecutive_count = 0;
+  const int target_consecutive_confirmations = 3;
+  const int centered_threshold = 15; // Tolerance pro vycentrování (v mm)
+  const int step_zone_threshold = 40; // Odchylka v mm, pod kterou přejdeme do krokového režimu
   
-  Serial.println("[MAIN] Zacinam plynule vyhledavani medveda (otaceni doleva)...");
+  Serial.println("[MAIN] Zacinam plynule vyhledavani medveda...");
 
-  // Pro otáčení DOLEVA musí levý motor couvat (kladná hodnota) a pravý jet dopředu (kladná hodnota)
-  man.motor(motors.m_id_left).speed(motors.pctToSpeed(search_speed));
+  // Vyčistíme stará data z bufferu přijímače, abychom nezastavili na starých datech
+  message.clearRxBuffer();
+
+  // Spustíme počáteční otáčení doleva (pouze pravým kolem, levé stojí na místě)
+  man.motor(motors.m_id_left).speed(0);
   man.motor(motors.m_id_right).speed(motors.pctToSpeed(search_speed));
   
   while(true) {
       message.SendInPosstionMessage();
       message.WaitingForBearPosData(); // Zde se sekne, dokud medved neni v zaberu
       
-      // Hodnota x_distance odteď chodí z Raspberry Pi v MILIMETRECH
       int x = message.x_distance;
+      int y = message.y_distance;
+
+      // Diagnostický výpis přijatých dat z Raspberry Pi
+      Serial.printf("[MAIN RX] Zprava z RPi: x=%d mm, y=%d mm, dist=%d mm, cam=%d, on=%d, shoda=%d/%d\n", 
+                    x, y, message.msg.distance, message.msg.camera, message.msg.on, 
+                    centered_consecutive_count + (abs(x) <= centered_threshold ? 1 : 0), 
+                    target_consecutive_confirmations);
       
-      // Zkontrolujeme, jestli je medved uprostred s velmi malou toleranci +- 6 mm
-      if (x >= -6 && x <= 6) {
-          Serial.println("[MAIN] Medved je presne pred nami (X je blizko 0)! Zastavuji otaceni.");
+      // Zkontrolujeme, jestli je medved vycentrován (v rámci tolerance +-15 mm)
+      if (abs(x) <= centered_threshold) {
+          centered_consecutive_count++;
+          
+          // Zastavíme motory pro přesné změření v klidu
           man.motor(motors.m_id_left).speed(0);
           man.motor(motors.m_id_right).speed(0);
-          break;
+          
+          if (centered_consecutive_count >= target_consecutive_confirmations) {
+              Serial.printf("[MAIN] Vyhledavani uspesne dokončeno! Medved potvrzen %d-krat za sebou. Koncova poloha: x=%d mm, y=%d mm.\n", 
+                            target_consecutive_confirmations, x, y);
+              break;
+          }
+          continue; // Přejdeme na další měření bez pohybu
+      } else {
+          // Pokud je chyba mimo toleranci, vynulujeme počítadlo potvrzení
+          centered_consecutive_count = 0;
       }
       
-      // Vypocet plynuleho zpomaleni (max X je zhruba 300 mm od stredu)
-      float current_speed = (abs(x) / 300.0f) * search_speed;
-      if (current_speed < min_speed) current_speed = min_speed;
-      if (current_speed > search_speed) current_speed = search_speed;
-      
-      // Pokud je x > 6, prelozili jsme ho a medved je nyni napravo od robota. Musime se otocit zpet DOPRAVA!
-      if (x > 6) {
-          Serial.printf("[MAIN] Prejeli jsme! x=%d mm. Menim smer, tocim se DOPRAVA rychlosti %.1f %%\n", x, current_speed);
-          // Pro otaceni DOPRAVA dame zapornou hodnotu do obou motoru
-          man.motor(motors.m_id_left).speed(motors.pctToSpeed(-current_speed));
-          man.motor(motors.m_id_right).speed(motors.pctToSpeed(-current_speed));
+      // Pokud jsme blízko cíle (chyba <= 40 mm), pohybujeme se v malých pulsech (pouze pravým kolem)
+      if (abs(x) <= step_zone_threshold) {
+          if (x > 0) {
+              Serial.printf("[MAIN] Krokovy rezim DOPRAVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, min_speed);
+              man.motor(motors.m_id_left).speed(0); // Levé kolo stojí
+              man.motor(motors.m_id_right).speed(motors.pctToSpeed(-min_speed)); // Pravé couvá
+          } else {
+              Serial.printf("[MAIN] Krokovy rezim DOLEVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, min_speed);
+              man.motor(motors.m_id_left).speed(0); // Levé kolo stojí
+              man.motor(motors.m_id_right).speed(motors.pctToSpeed(min_speed)); // Pravé jede vpřed
+          }
+          
+          delay(40); // Krátký pulz 40 ms
+          
+          // Okamžitě zastavíme motory
+          man.motor(motors.m_id_left).speed(0);
+          man.motor(motors.m_id_right).speed(0);
+          
+          delay(50); // Krátká stabilizační pauza před dalším měřením
       } 
-      // Jinak jsme medveda jeste nedotahli do stredu, nebo je nalevo. Tocime se stale DOLEVA.
+      // Pokud jsme daleko (chyba > 40 mm), otáčíme se plynule s dynamickou rychlostí (pouze pravým kolem)
       else {
-          Serial.printf("[MAIN] Srovnavam: x=%d mm, tocim DOLEVA rychlosti %.1f %%\n", x, current_speed);
-          // Pro otaceni DOLEVA dame kladnou hodnotu do obou motoru
-          man.motor(motors.m_id_left).speed(motors.pctToSpeed(current_speed));
-          man.motor(motors.m_id_right).speed(motors.pctToSpeed(current_speed));
+          float current_speed = (abs(x) / 300.0f) * search_speed;
+          if (current_speed < min_speed) current_speed = min_speed;
+          if (current_speed > search_speed) current_speed = search_speed;
+          
+          if (x > 0) {
+              Serial.printf("[MAIN] Plynule DOPRAVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, current_speed);
+              man.motor(motors.m_id_left).speed(0); // Levé kolo stojí
+              man.motor(motors.m_id_right).speed(motors.pctToSpeed(-current_speed)); // Pravé couvá
+          } else {
+              Serial.printf("[MAIN] Plynule DOLEVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, current_speed);
+              man.motor(motors.m_id_left).speed(0); // Levé kolo stojí
+              man.motor(motors.m_id_right).speed(motors.pctToSpeed(current_speed)); // Pravé jede vpřed
+          }
       }
   }
 }
@@ -274,8 +315,8 @@ void setup()
   delay(500);
   Serial.println("[MAIN] Robot se spouští. Inicializace RBCX...");
 
-  //pro fungovani RBCX
-  man.install();
+  //pro fungovani RBCX (vypneme failsafe, protože vyhledávání blokuje na UART zprávách)
+  man.install(rb::MAN_DISABLE_MOTOR_FAILSAFE);
 
   Serial.println("[SERVOS] Inicializace SmartServoBus pres STM koprocesor...");
   //parametry pro komunikaci se servy 
@@ -294,8 +335,9 @@ void setup()
 //message.WaitForReadyMessage();
   Serial.println("[MAIN] Čekám na stisknutí tlačítka ON...");
   WaitEorStart();
-  man.stupidServo(0).setPosition(0);
-  Serial.println("[MAIN] Nastaveno hloupé servo. Čekám na další stisknutí tlačítka ON pro start...");
+  // Odblokování serva s kamerou, aby s ním šlo hýbat (vypneme PWM buzení)
+  man.stupidServo(0).disable();
+  Serial.println("[MAIN] Servo s kamerou odblokováno. Čekám na další stisknutí tlačítka ON pro start...");
   WaitEorStart();
   delay(100);
   Serial.println("[MAIN] Původní jízda do hřiště (GoToField) je zakomentovaná pro účely testování...");
