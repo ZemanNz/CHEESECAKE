@@ -49,10 +49,10 @@ Sector sector = blue; //vychozi sektor je blue
 void GoToField(){
   move.Acceleration(300,32000,400);
   move.ArcRight(180,180);
+  open_grabber = true; //otevírání grabberu ihned po rozjezdu rovně
   move.Straight(32000,100,5000);
-  open_grabber = true; //tady se zacne otevirat grabber
   move.Arcleft(161, 150);
-  move.Straight(20000, 490,4000);
+  move.Straight(20000, 990,4000); // +500 mm dál do hřiště
   move.Acceleration(20000, 100, 340);
   move.Stop();
 }
@@ -236,10 +236,12 @@ void OpenGrabberBeforeField(){
   grabber.HalfOpen();
 }
 
-// Funkce pro plynulé vyhledávání medvěda (s potlačením šumu, limitou 90° a vrácením ujetých tiků)
-int FindBearLeft() {
-  float search_speed_forward = 6.0f; // Rychlost hledání tam (0° -> 90°)
-  float search_speed_back = 3.0f;    // Rychlost hledání zpět (90° -> 0°)
+// Nová strategie vyhledávání medvěda:
+// Pokus 1: Z výchozí pozice se otočíme -10° doprava, pak zametáme 170° doleva (rychle tam, pomalu zpět)
+// Pokus 2: Otočíme se na 90° doleva, popojedeme 30 cm dopředu, pak plných 360°
+int FindBear() {
+  float search_speed_forward = 6.0f; // Rychlost hledání tam
+  float search_speed_back = 3.0f;    // Rychlost hledání zpět
   float min_speed = 3.0f;            // Rychlost jemných kroků (vycentrování)
   int centered_consecutive_count = 0;
   const int target_consecutive_confirmations = 3;
@@ -250,58 +252,64 @@ int FindBearLeft() {
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
   const int ticks_10 = max_ticks_90 * 10 / 90;
   
-  for (int attempt = 1; attempt <= 3; attempt++) {
-      if (attempt == 1) {
-          Serial.println("[MAIN] Hledání medvěda - 1. pokus...");
-      } else {
-          // Před dalším pokusem popojedeme o 32 cm dopředu rychlostí 35 %
-          Serial.printf("[MAIN] Pokus %d selhal. Popojíždím o 320 mm dopředu rychlostí 35 %%\n", attempt - 1);
-          motors.forward_acc(320, 35);
-      }
-
-      // Rychlost hledání pro tento pokus (u 2. a 3. pokusu se otáčíme pomalu v obou směrech)
-      float current_forward_speed = (attempt == 1) ? search_speed_forward : search_speed_back;
+  for (int attempt = 1; attempt <= 2; attempt++) {
+      // === PŘÍPRAVA POZICE PŘED ZAMETÁNÍM ===
+      int sweep_end_ticks = 0;   // Kam zametáme (v tikách enkodéru)
+      int sweep_start_ticks = 0; // Odkud se vracíme zpět
+      float current_forward_speed = search_speed_forward;
       float current_back_speed = search_speed_back;
 
-      // Vynulujeme enkodér pravého kola před začátkem pokusu
-      man.motor(rb::MotorId::M3).setCurrentPosition(0);
+      if (attempt == 1) {
+          // Pokus 1: Otočíme se 10° doprava a pak zametáme 170° doleva (-10° až +160°)
+          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah -10° až +160°");
+          
+          Serial.println("[MAIN] Otáčím se 10° DOPRAVA pro pokrytí pravého boku...");
+          motors.turn_on_spot_right(10, 30.0f);
+          
+          // Nastavíme enkodér na -ticks_10 (jsme nyní na -10°)
+          man.motor(rb::MotorId::M3).setCurrentPosition(-ticks_10);
+          
+          sweep_start_ticks = -ticks_10;           // -10°
+          sweep_end_ticks = max_ticks_90 * 160 / 90; // +160°
+          
+      } else {
+          // Pokus 2: Otočíme se na 90° a popojedeme 30 cm, pak 360°
+          Serial.println("[MAIN] 1. pokus selhal. Otáčím se na 90° a popojíždím 30 cm...");
+          
+          motors.turn_on_spot_left(90, 40.0f);
+          motors.forward_acc(300, 35);
+          
+          // Reset gyro a enkodéry
+          man.mpu().resetAngleZ();
+          delay(100);
+          man.motor(rb::MotorId::M3).setCurrentPosition(0);
+          
+          Serial.println("[MAIN] Hledání medvěda - 2. pokus: Plných 360°");
+          sweep_start_ticks = 0;
+          sweep_end_ticks = max_ticks_90 * 180 / 90; // +180°
+          current_forward_speed = search_speed_back; // pomalu
+      }
 
-      // Vyčistíme stará data z bufferu přijímače
+      // Vyčistíme stará data
       message.clearRxBuffer();
 
-      // 0. Nejprve zkontrolujeme, zda medvěda nevidíme přímo před sebou bez otáčení
-      Serial.println("[MAIN] Kontroluji, zda medvěd není přímo před námi...");
-      bool found_initially = false;
-      uint32_t start_check = millis();
-      while (millis() - start_check < 800) {
-          message.SendInPosstionMessage();
-          delay(100);
-          if (message.receiveMessage()) {
-              if (message.msg.x != 0 || message.msg.y != 0 || message.msg.distance != 0) {
-                  Serial.printf("[MAIN] Medvěd nalezen hned na startu! Souřadnice: x=%d, y=%d. Přeskakuji vyhledávací rotaci.\n", message.x_distance, message.y_distance);
-                  found_initially = true;
-                  break;
-              }
-          }
-      }
-
-      // Spustíme počáteční otáčení doleva (pouze pravým kolem, levé stojí na místě), pokud jsme ho nenašli hned
-      int direction = 1; // 1 = doleva (vpřed), -1 = doprava (zpět k nule)
+      // Spustíme počáteční otáčení doleva
+      int direction = 1;
       man.motor(rb::MotorId::M2).speed(0);
-      if (!found_initially) {
-          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_forward_speed));
-      } else {
-          man.motor(rb::MotorId::M3).speed(0);
-      }
+      man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_forward_speed));
       
-      int current_ticks = 0;
+      int current_ticks = (attempt == 1) ? -ticks_10 : 0;
       uint32_t last_send_time = 0;
       uint32_t last_info_time = 0;
       uint32_t last_bear_seen_time = millis();
       centered_consecutive_count = 0;
+      bool sweep_failed = false;
       
+      // Pro 2. pokus: pass 1 = 0->180°, pass 2 = 180°->-180° (celkem 360°)
+      int pass = 1;
+
       while(true) {
-          // 1. Zkontrolujeme aktuální pozici pravého kola (s ochranou proti přehlcení SPI)
+          // 1. Aktuální pozice pravého kola
           if (millis() - last_info_time > 20) {
               man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
                   current_ticks = info.position();
@@ -309,173 +317,147 @@ int FindBearLeft() {
               last_info_time = millis();
           }
           
-          // Absolutní bezpečnostní limity otáčení (cca -10° až +100°)
-          const int max_ticks_100 = max_ticks_90 * 100 / 90;
-          if (current_ticks > max_ticks_100 || current_ticks < -ticks_10) {
-              Serial.printf("[MAIN] Absolutní bezpečnostní limit překročen (ticks=%d, rozsah: [%d, %d]). Návrat k nule...\n", 
-                            current_ticks, -ticks_10, max_ticks_100);
-              man.motor(rb::MotorId::M2).speed(0);
-              
-              if (current_ticks < 0) {
+          // === KONTROLA LIMITŮ OTÁČENÍ ===
+          if (attempt == 1) {
+              // Pokus 1: -10° až +160° tam a zpět
+              if (direction == 1 && current_ticks > sweep_end_ticks) {
+                  Serial.printf("[MAIN] Dosažen +160° (%d tiků). Otáčím se ZPĚT...\n", current_ticks);
+                  direction = -1;
+                  man.motor(rb::MotorId::M2).speed(0);
+                  man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_back_speed));
+              } 
+              else if (direction == -1 && current_ticks < sweep_start_ticks) {
+                  Serial.printf("[MAIN] Zpět na -10° (%d tiků). Pokus 1 ukončen.\n", current_ticks);
+                  // Vrátíme se na 0°
                   man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_back_speed));
-              } else {
+                  uint32_t last_req = 0;
+                  while (true) {
+                      if (millis() - last_req > 20) {
+                          man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
+                              current_ticks = info.position();
+                          });
+                          last_req = millis();
+                      }
+                      if (current_ticks >= -50 && current_ticks <= 50) break;
+                      delay(5);
+                  }
+                  man.motor(rb::MotorId::M3).speed(0);
+                  Serial.println("[MAIN] Vráceno na 0°.");
+                  break;
+              }
+          } else {
+              // Pokus 2: plných 360° (pass 1: 0->180°, pass 2: 180°->-180°)
+              if (pass == 1 && direction == 1 && current_ticks > sweep_end_ticks) {
+                  Serial.printf("[MAIN] Dosažen +180° (%d tiků). Pokračuji zpět na -180°...\n", current_ticks);
+                  pass = 2;
+                  direction = -1;
+                  int target_minus_180 = -max_ticks_90 * 180 / 90;
+                  sweep_start_ticks = target_minus_180;
+                  man.motor(rb::MotorId::M2).speed(0);
                   man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_back_speed));
               }
-              
-              uint32_t last_req = 0;
-              while (true) {
-                  if (millis() - last_req > 20) {
-                      man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
-                          current_ticks = info.position();
-                      });
-                      last_req = millis();
+              else if (pass == 2 && direction == -1 && current_ticks < sweep_start_ticks) {
+                  Serial.printf("[MAIN] Dosažen -180° (%d tiků). Pokus 2 ukončen.\n", current_ticks);
+                  man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_back_speed));
+                  uint32_t last_req = 0;
+                  while (true) {
+                      if (millis() - last_req > 20) {
+                          man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
+                              current_ticks = info.position();
+                          });
+                          last_req = millis();
+                      }
+                      if (current_ticks >= -50 && current_ticks <= 50) break;
+                      delay(5);
                   }
-                  if ((current_ticks >= 0 && current_ticks < 50) || (current_ticks <= 0 && current_ticks > -50)) {
-                      break;
-                  }
-                  delay(5);
+                  man.motor(rb::MotorId::M3).speed(0);
+                  Serial.println("[MAIN] Vráceno na 0°.");
+                  sweep_failed = true;
+                  break;
               }
-              man.motor(rb::MotorId::M3).speed(0);
-              Serial.println("[MAIN] Bezpečně vráceno a srovnáno na 0°.");
-              break; // přeruší vnitřní smyčku, začne nový pokus
-          }
-          
-          // Kontrola limitů otáčení v závislosti na směru hledání
-          if (direction == 1 && current_ticks > max_ticks_90) {
-              Serial.printf("[MAIN] Dosažen limit 90° (%d tiků). Medvěd nenalezen. Otáčím se ZPĚT pomaleji (rychlost %.1f %%)...\n", current_ticks, current_back_speed);
-              direction = -1;
-              man.motor(rb::MotorId::M2).speed(0);
-              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_back_speed));
-          } 
-          else if (direction == -1 && current_ticks < -ticks_10) {
-              Serial.printf("[MAIN] Dosažen limit -10° (%d tiků) při přejíždění nuly. Pokus %d selhal. Vracím se na 0°...\n", current_ticks, attempt);
-              man.motor(rb::MotorId::M2).speed(0);
-              
-              // Pomalý návrat dopředu zpět na 0°
-              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_back_speed));
-              uint32_t last_req = 0;
-              while (true) {
-                  if (millis() - last_req > 20) {
-                      man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
-                          current_ticks = info.position();
-                      });
-                      last_req = millis();
-                  }
-                  if (current_ticks >= 0) {
-                      break;
-                  }
-                  delay(5);
-              }
-              man.motor(rb::MotorId::M3).speed(0);
-              Serial.println("[MAIN] Vráceno a srovnáno na 0°.");
-              break; // přeruší vnitřní smyčku, pokračuje dalším pokusem (attempt)
           }
 
-          // 2. Pravidelně posíláme dotaz "inposition" do RPi
+          // 2. Posíláme "inposition" do RPi
           if (millis() - last_send_time > 100) {
               message.SendInPosstionMessage();
               last_send_time = millis();
           }
 
-          // 3. Zkontrolujeme, zda přišla nová nenulová data z RPi (neblokujícím způsobem)
+          // 3. Příjem dat z RPi
           if (message.receiveMessage()) {
               if (message.msg.x != 0 || message.msg.y != 0 || message.msg.distance != 0) {
                   int x = message.x_distance;
                   int y = message.y_distance;
                   
-                  // Aktualizujeme čas posledního úspěšného spatření medvěda
                   last_bear_seen_time = millis();
                   
                   float current_search_speed = (direction == 1) ? current_forward_speed : current_back_speed;
 
-                  // Diagnostický výpis přijatých dat z Raspberry Pi
-                  Serial.printf("[MAIN RX] Zprava z RPi: x=%d mm, y=%d mm, dist=%d mm, cam=%d, on=%d, shoda=%d/%d, tiky=%d/%d, smer=%d\n", 
-                                x, y, message.msg.distance, message.msg.camera, message.msg.on, 
+                  Serial.printf("[MAIN RX] x=%d mm, y=%d mm, shoda=%d/%d, tiky=%d, smer=%d\n", 
+                                x, y, 
                                 centered_consecutive_count + (abs(x) <= centered_threshold ? 1 : 0), 
-                                target_consecutive_confirmations, current_ticks, max_ticks_90, direction);
+                                target_consecutive_confirmations, current_ticks, direction);
                   
-                   // Zkontrolujeme, jestli je medved vycentrován (v rámci tolerance +-15 mm)
-                   if (abs(x) <= centered_threshold) {
-                       centered_consecutive_count++;
-                       
-                       // Zastavíme motory pro přesné změření v klidu
-                       man.motor(rb::MotorId::M2).speed(0);
-                       man.motor(rb::MotorId::M3).speed(0);
-                       
-                       // STRATEGICKÝ KROK: Pokud je medvěd daleko (y > 500 mm) a je zhruba vycentrován,
-                       // popojedeme o polovinu vzdálenosti blíže a začneme měřit znovu od nuly.
-                       // Tím dostaneme robota do pozice, kde je medvěd blízko a stabilně sledovatelný přes HSV.
-                       if (!has_driven_halfway && y > 400) {
-                           int half_dist = y / 2;
-                           Serial.printf("[MAIN] Detekován vzdálený medvěd (y=%d mm, x=%d mm). Popojíždím o %d mm blíže pro přesné zaměření.\n", y, x, half_dist);
-                           delay(150); // Pauza na úplné zastavení
-                           
-                           // Popojedeme dopředu rychlostí 40 %
-                           motors.forward_acc(half_dist, 40);
-                           
-                           has_driven_halfway = true;
-                           
-                           // Resetujeme gyroskop a enkodéry na novou nulu
-                           man.mpu().resetAngleZ();
-                           delay(100);
-                           man.motor(rb::MotorId::M3).setCurrentPosition(0);
-                           
-                           // Vrátíme se na začátek vyhledávání (pokus = 1)
-                           attempt = 0;
-                           break; // vyskočíme z vnitřní smyčky a vyhledávání začne znovu z nové pozice
-                       }
-                       
-                       if (centered_consecutive_count >= target_consecutive_confirmations) {
-                           Serial.printf("[MAIN] Vyhledavani uspesne dokončeno! Medved potvrzen %d-krat za sebou. Koncova poloha: x=%d mm, y=%d mm, tiky=%d.\n", 
-                                         target_consecutive_confirmations, x, y, current_ticks);
-                           return current_ticks;
-                       }
-                       continue; // Přejdeme na další měření bez pohybu
-                   } else {
-                      // Pokud je chyba mimo toleranci, vynulujeme počítadlo potvrzení
-                      centered_consecutive_count = 0;
-                  }
-                  
-                  // Pokud jsme blízko cíle (chyba <= 40 mm), pohybujeme se v malých pulsech (pouze pravým kolem)
-                  if (abs(x) <= step_zone_threshold) {
-                      if (x > 0) {
-                          Serial.printf("[MAIN] Krokovy rezim DOPRAVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, min_speed);
-                          man.motor(rb::MotorId::M2).speed(0); // Levé kolo stojí
-                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-min_speed)); // Pravé couvá
-                      } else {
-                          Serial.printf("[MAIN] Krokovy rezim DOLEVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, min_speed);
-                          man.motor(rb::MotorId::M2).speed(0); // Levé kolo stojí
-                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(min_speed)); // Pravé jede vpřed
-                      }
-                      
-                      delay(40); // Krátký pulz 40 ms
-                      
-                      // Okamžitě zastavíme motory
+                  // Vycentrování
+                  if (abs(x) <= centered_threshold) {
+                      centered_consecutive_count++;
                       man.motor(rb::MotorId::M2).speed(0);
                       man.motor(rb::MotorId::M3).speed(0);
                       
-                      delay(50); // Krátká stabilizační pauza před dalším měřením
-                  } 
-                  // Pokud jsme daleko (chyba > 40 mm), otáčíme se plynule s dynamickou rychlostí (pouze pravým kolem)
-                  else {
+                      // Poloviční dojezd pro vzdáleného medvěda
+                      if (!has_driven_halfway && y > 400) {
+                          int half_dist = y / 2;
+                          Serial.printf("[MAIN] Vzdálený medvěd (y=%d mm). Popojíždím o %d mm blíže.\n", y, half_dist);
+                          delay(150);
+                          motors.forward_acc(half_dist, 40);
+                          has_driven_halfway = true;
+                          man.mpu().resetAngleZ();
+                          delay(100);
+                          man.motor(rb::MotorId::M3).setCurrentPosition(0);
+                          attempt = 0;
+                          break;
+                      }
+                      
+                      if (centered_consecutive_count >= target_consecutive_confirmations) {
+                          Serial.printf("[MAIN] Medvěd potvrzen %dx! x=%d, y=%d, tiky=%d.\n", 
+                                        target_consecutive_confirmations, x, y, current_ticks);
+                          return current_ticks;
+                      }
+                      continue;
+                  } else {
+                      centered_consecutive_count = 0;
+                  }
+                  
+                  // Krokový režim
+                  if (abs(x) <= step_zone_threshold) {
+                      if (x > 0) {
+                          man.motor(rb::MotorId::M2).speed(0);
+                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-min_speed));
+                      } else {
+                          man.motor(rb::MotorId::M2).speed(0);
+                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(min_speed));
+                      }
+                      delay(40);
+                      man.motor(rb::MotorId::M2).speed(0);
+                      man.motor(rb::MotorId::M3).speed(0);
+                      delay(50);
+                  } else {
                       float current_speed = (abs(x) / 300.0f) * current_search_speed;
                       if (current_speed < min_speed) current_speed = min_speed;
                       if (current_speed > current_search_speed) current_speed = current_search_speed;
                       
                       if (x > 0) {
-                          Serial.printf("[MAIN] Plynule DOPRAVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, current_speed);
-                          man.motor(rb::MotorId::M2).speed(0); // Levé kolo stojí
-                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_speed)); // Pravé couvá
+                          man.motor(rb::MotorId::M2).speed(0);
+                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_speed));
                       } else {
-                          Serial.printf("[MAIN] Plynule DOLEVA (pouze prave kolo): x=%d mm, rychlost %.1f %%\n", x, current_speed);
-                          man.motor(rb::MotorId::M2).speed(0); // Levé kolo stojí
-                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_speed)); // Pravé jede vpřed
+                          man.motor(rb::MotorId::M2).speed(0);
+                          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_speed));
                       }
                   }
               }
           }
 
-          // Pokud jsme ztratili medvěda z dohledu na více než 500 ms, obnovíme standardní zametání
+          // Ztráta medvěda -> obnovení zametání
           if (millis() - last_bear_seen_time > 500) {
               float speed = (direction == 1) ? current_forward_speed : -current_back_speed;
               man.motor(rb::MotorId::M2).speed(0);
@@ -485,13 +467,13 @@ int FindBearLeft() {
 
           delay(10);
       }
+      
+      if (sweep_failed) break;
   }
 
-  // Pokud všechny pokusy selhaly
-  Serial.println("[MAIN] Všechny pokusy o vyhledání medvěda selhaly. Končím s chybou.");
+  Serial.println("[MAIN] Všechny pokusy o vyhledání medvěda selhaly.");
   return -9999;
 }
-
 void setup()
 {
   Serial.begin(115200);
@@ -599,7 +581,7 @@ void setup()
   Serial.printf("[MAIN] Nulový úhel nastaven. Gyro Z před vyhledáváním = %.2f°\n", man.mpu().getAngleZ());
 
   // Spuštění plynulého vyhledávání medvěda
-  int search_ticks = FindBearLeft();
+  int search_ticks = FindBear();
   
   if (search_ticks == -9999) {
       Serial.println("[MAIN] Detekce selhala nebo prekrocila 90 stupnu. Ukoncuji jizdu.");
@@ -645,12 +627,12 @@ void setup()
   man.leds().blue(false);
   man.leds().green(false);
 
-  // Otevření klepet v závislosti na úhlu od stěn (rezerva 20 stupňů od 0° a 90°)
-  if (search_angle >= 20.0f && search_angle <= 80.0f) {
-      logMsg("[KLEPETA] Medvěd je v bezpečném úhlu. Otevírám klepeta naplno (Open)...");
+  // Otevření klepet v závislosti na úhlu od stěn (rezerva 20 stupňů od krajů)
+  if (search_angle >= 20.0f && search_angle <= 140.0f) {
+      logMsg("[KLEPETA] Medvěd je v bezpečném úhlu (%.1f°). Otevírám klepeta naplno (Open)...", search_angle);
       grabber.Open();
   } else {
-      logMsg("[KLEPETA] Medvěd je blízko stěny. Otevírám klepeta pouze částečně (HalfOpen) pro zamezení nárazu do zdi...");
+      logMsg("[KLEPETA] Medvěd je blízko stěny (%.1f°). Otevírám klepeta pouze částečně (HalfOpen)...", search_angle);
       grabber.HalfOpen();
   }
   
@@ -724,90 +706,45 @@ void setup()
       logMsg("[KLEPETA] Varování: Medvěd nebyl spolehlivě detekován v klepetech ani po 3 pokusech. Pokračuji v návratu domů.");
   }
   
-  // 1. Odcouvání 10 cm s akcelerací pro uvolnění (společné pro obě trasy)
+  // 1. Odcouvání 10 cm s akcelerací pro uvolnění
   logMsg("[POHYB] Couvám 100 mm zpět s akcelerací pro uvolnění...");
   motors.backward_acc(100.0f, 30.0f);
 
-  // 2. Načteme aktuální orientaci robota PO odcouvání (pro eliminaci prokluzů a nárazů klepety)
+  // 2. Načteme aktuální orientaci robota PO odcouvání
   float current_heading_raw = man.mpu().getAngleZ();
   float current_heading = current_heading_raw * gyro_polarity;
 
-  // Vyhodnocení rychlého návratu:
-  // - Pokud se robot otočil doprava (do záporných úhlů k pravé stěně), povolujeme pouze velmi malou odchylku do -5° (téměř rovně).
-  // - Pokud se robot otočil doleva (do kladných úhlů), povolujeme odchylku až do +15°.
-  // Tím zabráníme kolizi s pravou stěnou při zpětné jízdě.
-  bool direct_return = (search_angle >= -5.0f && search_angle <= 15.0f) && 
-                       (current_heading >= -5.0f && current_heading <= 15.0f);
+  // 3. Dorovnání na 90° pomocí gyroskopu
+  // remaining_angle = 90 - current_heading
+  // Kladný = dotočit doleva, záporný = dotočit doprava
+  float remaining_angle = 90.0f - current_heading;
   
-  if (direct_return) {
-      logMsg("[MAIN] Rychlý návrat: Úhel výjezdu (%.2f°) i úhel po odcouvání (%.2f°) jsou v toleranci. Couvám ke spodní stěně...", search_angle, current_heading);
-      // Rozsvítíme žlutou LED pro vizuální potvrzení rychlé trasy
-      man.leds().yellow(true);
-      
-      // Pokračujeme v couvání ke spodní stěně bludiště na zadní mikrospínače
-      motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
-      
-      logMsg("[MAIN] Jedeme domů (GoHome - rychlá trasa)...");
-      GoHome(true); // Přeskočí otočení o 90° a vyrovnání u pravé stěny
+  // Wrap do [-180, 180]
+  while (remaining_angle > 180.0f) remaining_angle -= 360.0f;
+  while (remaining_angle < -180.0f) remaining_angle += 360.0f;
+  
+  logMsg("[POHYB] Dorovnání na 90°: aktuální heading=%.2f° (raw=%.2f°), zbývající otočení=%.2f°", 
+         current_heading, current_heading_raw, remaining_angle);
+  
+  if (remaining_angle > 2.0f) {
+      logMsg("[POHYB] Dotáčím se o %.1f° DOLEVA na 90°...", remaining_angle);
+      motors.turn_on_spot_left(remaining_angle, 40.0f);
+  } else if (remaining_angle < -2.0f) {
+      logMsg("[POHYB] Dotáčím se o %.1f° DOPRAVA na 90°...", std::abs(remaining_angle));
+      motors.turn_on_spot_right(std::abs(remaining_angle), 40.0f);
   } else {
-      logMsg("[MAIN] Standardní návrat: Úhel výjezdu (%.2f°) nebo úhel po odcouvání (%.2f°) je mimo toleranci. Vyrovnám se o pravou stěnu.", search_angle, current_heading);
-      
-      // Natočení se na 90 stupňů k pravé stěně na základě Gyro Z heading a enkodérů
-      float remaining_angle_ticks = 90.0f - search_angle_ticks;
-      float remaining_angle_gyro = 90.0f - current_heading;
-      
-      // Pomocný lambda výraz pro wrap úhlu do rozmezí [-180, 180] stupňů
-      auto wrap_180 = [](float angle) {
-          while (angle > 180.0f) angle -= 360.0f;
-          while (angle < -180.0f) angle += 360.0f;
-          return angle;
-      };
-      
-      remaining_angle_ticks = wrap_180(remaining_angle_ticks);
-      remaining_angle_gyro = wrap_180(remaining_angle_gyro);
-      
-      float remaining_angle = remaining_angle_gyro; // Výchozí
-      float diff = std::abs(remaining_angle_gyro - remaining_angle_ticks);
-      
-      logMsg("[POHYB ANGLE] Výpočet otočení k pravé stěně (korigovaný polaritou & wrap):");
-      logMsg("  - Podle enkodérů: %.2f°", remaining_angle_ticks);
-      logMsg("  - Podle gyroskopu: %.2f° (korigovaný azimut: %.2f°, Raw: %.2f°)", remaining_angle_gyro, current_heading, current_heading_raw);
-      logMsg("  - Rozdíl metod: %.2f°", diff);
-      
-      if (diff <= 15.0f) {
-          remaining_angle = remaining_angle_gyro;
-          logMsg("[POHYB ANGLE] Shoda v toleranci 15°. Používám gyroskop: %.2f°", remaining_angle);
-      } else {
-          // V případě větší odchylky použijeme průměr obou hodnot pro eliminaci hrubé chyby
-          remaining_angle = (remaining_angle_gyro + remaining_angle_ticks) / 2.0f;
-          logMsg("[POHYB ANGLE] VAROVÁNÍ: Hodnoty se rozcházejí! Používám průměr obou: %.2f°", remaining_angle);
-      }
-      
-      // Znovu wrapneme výsledný úhel pro nalezení nejkratší trasy otočení
-      remaining_angle = wrap_180(remaining_angle);
-      
-      // Uživatelské pravidlo: Po chycení medvěda se nikdy neotáčíme doprava.
-      // Pokud je zbývající úhel záporný (přejeli jsme 90°), neotáčíme se a necháme se vyrovnat stěnou.
-      if (remaining_angle < 0) {
-          logMsg("[POHYB] Vypočtený zbývající úhel je %.2f° (záporný). Otáčení doprava je zakázáno, zůstávám stát.", remaining_angle);
-          remaining_angle = 0.0f;
-      }
-      
-      if (remaining_angle > 0) {
-          logMsg("[POHYB] Dotáčím se o zbývající úhel %.1f° doleva na plných 90° na místě...", remaining_angle);
-          motors.turn_on_spot_left(remaining_angle, 40.0f);
-      }
-      
-      // 3. Couvání k pravé stěně bludiště pro srovnání pomocí back_buttons (rychlost 75.0f):
-      logMsg("[POHYB] Couvám k pravé stěně bludiště pro srovnání pomocí back_buttons...");
-      motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
-      
-      // 4. Nyní jsme vyrovnaní u pravé stěny bludiště a jedeme domů
-      logMsg("[MAIN] Jedeme domů (GoHome - standardní trasa)...");
-      GoHome(false);
+      logMsg("[POHYB] Již jsme na 90° (odchylka %.2f°). Nepotřebuji se otáčet.", remaining_angle);
   }
+  
+  // 4. Couvání k pravé stěně pro srovnání
+  logMsg("[POHYB] Couvám k pravé stěně bludiště pro srovnání...");
+  motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+  
+  // 5. Jedeme domů (standardní trasa - od pravé stěny)
+  logMsg("[MAIN] Jedeme domů (GoHome)...");
+  GoHome(false);
+  
   logMsg("[MAIN] Robot dojel domů. Konec programu.");
-  // Zhasneme žlutou LED po dojezdu domů
   man.leds().yellow(false);
 }
 
