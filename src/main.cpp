@@ -491,9 +491,23 @@ void setup()
   float search_angle_ticks = (search_ticks * 90.0f) / max_ticks_90;
   
   // Načtení úhlu z gyroskopu
-  float search_angle = man.mpu().getAngleZ();
-  Serial.printf("[GYRO] Srovnaný úhel k medvědovi podle gyroskopu: Z = %.2f° (Ticks calculated: %.2f°)\n", 
-                search_angle, search_angle_ticks);
+  float search_angle_raw = man.mpu().getAngleZ();
+  
+  // Detekce polarity gyroskopu vůči enkodérům (pouze pokud se robot reálně pohnul o více než 5 stupňů)
+  float gyro_polarity = 1.0f;
+  if (std::abs(search_angle_ticks) > 5.0f && std::abs(search_angle_raw) > 5.0f) {
+      if ((search_angle_ticks > 0 && search_angle_raw < 0) || (search_angle_ticks < 0 && search_angle_raw > 0)) {
+          gyro_polarity = -1.0f;
+          Serial.println("[GYRO] ZJIŠTĚNA INVERZNÍ POLARITA GYROSKOPU. Nastavuji koeficient polarity na -1.0.");
+      } else {
+          gyro_polarity = 1.0f;
+          Serial.println("[GYRO] Polarita gyroskopu souhlasí s enkodéry (koeficient 1.0).");
+      }
+  }
+  
+  float search_angle = search_angle_raw * gyro_polarity;
+  Serial.printf("[GYRO] Srovnaný úhel k medvědovi podle gyroskopu (korigovaný): Z = %.2f° (Raw: %.2f°, Ticks: %.2f°)\n", 
+                search_angle, search_angle_raw, search_angle_ticks);
 
   // Rozsvítit MODROU (a pro jistotu i zelenou) LED pro indikaci nalezení cíle
   man.leds().blue(true);
@@ -592,18 +606,48 @@ void setup()
   Serial.println("[POHYB] Couvám 100 mm zpět s akcelerací...");
   motors.backward_acc(100.0f, 30.0f);
   
-  // 2. Natočení se na 90 stupňů k pravé stěně na základě Gyro Z heading
-  float current_heading = man.mpu().getAngleZ();
-  float remaining_angle = 90.0f - current_heading;
+  // 2. Natočení se na 90 stupňů k pravé stěně na základě Gyro Z heading a enkodérů
+  float current_heading_raw = man.mpu().getAngleZ();
+  float current_heading = current_heading_raw * gyro_polarity;
   
-  Serial.printf("[POHYB GYRO] Aktuální azimut z gyroskopu: %.2f°, potřebujeme se natočit na 90°.\n", current_heading);
-  Serial.printf("[POHYB GYRO] Výpočet zbývajícího úhlu pro otočení k pravé stěně: %.2f°\n", remaining_angle);
+  float remaining_angle_ticks = 90.0f - search_angle_ticks;
+  float remaining_angle_gyro = 90.0f - current_heading;
+  
+  // Pomocný lambda výraz pro wrap úhlu do rozmezí [-180, 180] stupňů
+  auto wrap_180 = [](float angle) {
+      while (angle > 180.0f) angle -= 360.0f;
+      while (angle < -180.0f) angle += 360.0f;
+      return angle;
+  };
+  
+  remaining_angle_ticks = wrap_180(remaining_angle_ticks);
+  remaining_angle_gyro = wrap_180(remaining_angle_gyro);
+  
+  float remaining_angle = remaining_angle_gyro; // Výchozí
+  float diff = std::abs(remaining_angle_gyro - remaining_angle_ticks);
+  
+  Serial.printf("[POHYB ANGLE] Výpočet otočení k pravé stěně (korigovaný polaritou & wrap):\n");
+  Serial.printf("  - Podle enkodérů: %.2f°\n", remaining_angle_ticks);
+  Serial.printf("  - Podle gyroskopu: %.2f° (korigovaný azimut: %.2f°, Raw: %.2f°)\n", remaining_angle_gyro, current_heading, current_heading_raw);
+  Serial.printf("  - Rozdíl metod: %.2f°\n", diff);
+  
+  if (diff <= 15.0f) {
+      remaining_angle = remaining_angle_gyro;
+      Serial.printf("[POHYB ANGLE] Shoda v toleranci 15°. Používám gyroskop: %.2f°\n", remaining_angle);
+  } else {
+      // V případě větší odchylky použijeme průměr obou hodnot pro eliminaci hrubé chyby
+      remaining_angle = (remaining_angle_gyro + remaining_angle_ticks) / 2.0f;
+      Serial.printf("[POHYB ANGLE] VAROVÁNÍ: Hodnoty se rozcházejí! Používám průměr obou: %.2f°\n", remaining_angle);
+  }
+  
+  // Znovu wrapneme výsledný úhel pro nalezení nejkratší trasy otočení
+  remaining_angle = wrap_180(remaining_angle);
   
   if (remaining_angle > 0) {
       Serial.printf("[POHYB] Dotáčím se o zbývající úhel %.1f° doleva na plných 90° na místě...\n", remaining_angle);
       motors.turn_on_spot_left(remaining_angle, 40.0f);
   } else if (remaining_angle < 0) {
-      Serial.printf("[POHYB] Přejeli jsme 90°. Dotáčím se o %.1f° doprava na místě...\n", std::abs(remaining_angle));
+      Serial.printf("[POHYB] Přejeli jsme nebo se otáčíme doprava. Dotáčím se o %.1f° doprava na místě...\n", std::abs(remaining_angle));
       motors.turn_on_spot_right(std::abs(remaining_angle), 40.0f);
   }
   
