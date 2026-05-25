@@ -346,13 +346,14 @@ while True:
         overlaps_x = (yolo_x_min <= hsv_x_max) and (hsv_x_min <= yolo_x_max)
         
         # Ochrana: Obdélníky se musí překrývat v X (hledáme stejný sloupec v obraze)
-        # a zároveň HSV plocha/rozměry nesmí překročit 1.5x referenčního YOLO (volnější limit pro plynulé sledování)
-        if ref_yolo_area > 0 and 0.2 <= ratio <= 1.5 and hsv_w <= 1.5 * ref_yolo_w and hsv_h <= 1.5 * ref_yolo_h and overlaps_x:
+        # HSV šířka NESMÍ překročit referenční YOLO šířku (medvěd nemůže být v HSV širší než v YOLO)
+        # HSV výška může být až 1.5x (kvůli různému ořezu)
+        if ref_yolo_area > 0 and 0.2 <= ratio <= 1.5 and hsv_w <= ref_yolo_w and hsv_h <= 1.5 * ref_yolo_h and overlaps_x:
             is_valid_hsv = True
         else:
             reason = ""
             if not (0.2 <= ratio <= 1.5): reason += f"ratio={ratio:.2f} "
-            if hsv_w > 1.5 * ref_yolo_w: reason += f"hsv_w={hsv_w}>{1.5*ref_yolo_w:.1f} "
+            if hsv_w > ref_yolo_w: reason += f"hsv_w={hsv_w}>{ref_yolo_w:.1f} "
             if hsv_h > 1.5 * ref_yolo_h: reason += f"hsv_h={hsv_h}>{1.5*ref_yolo_h:.1f} "
             if not overlaps_x: reason += "no_x_overlap "
             print(f"[RPi MAIN] HSV odfiltrováno kvůli: {reason}(HSV area={hsv_area} W={hsv_w} H={hsv_h}, Ref YOLO area={ref_yolo_area} W={ref_yolo_w} H={ref_yolo_h})")

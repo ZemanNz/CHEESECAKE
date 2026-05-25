@@ -260,17 +260,17 @@ int FindBear() {
       float current_back_speed = search_speed_back;
 
       if (attempt == 1) {
-          // Pokus 1: Otočíme se 10° doprava a pak zametáme 170° doleva (-10° až +160°)
-          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah -10° až +160°");
+          // Pokus 1: Otočíme se 10° doprava a pak zametáme 180° doleva (-10° až +170°)
+          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah -10° až +170°");
           
           Serial.println("[MAIN] Otáčím se 10° DOPRAVA pro pokrytí pravého boku...");
-          motors.turn_on_spot_right(10, 30.0f);
+          motors.turn_on_spot_right(10, 40.0f);
           
           // Nastavíme enkodér na -ticks_10 (jsme nyní na -10°)
           man.motor(rb::MotorId::M3).setCurrentPosition(-ticks_10);
           
-          sweep_start_ticks = -ticks_10;           // -10°
-          sweep_end_ticks = max_ticks_90 * 160 / 90; // +160°
+          sweep_start_ticks = -ticks_10;              // -10°
+          sweep_end_ticks = max_ticks_90 * 170 / 90;  // +170°
           
       } else {
           // Pokus 2: Otočíme se na 90° a popojedeme 30 cm, pak 360°
@@ -319,9 +319,9 @@ int FindBear() {
           
           // === KONTROLA LIMITŮ OTÁČENÍ ===
           if (attempt == 1) {
-              // Pokus 1: -10° až +160° tam a zpět
+              // Pokus 1: -10° až +170° tam a zpět
               if (direction == 1 && current_ticks > sweep_end_ticks) {
-                  Serial.printf("[MAIN] Dosažen +160° (%d tiků). Otáčím se ZPĚT...\n", current_ticks);
+                  Serial.printf("[MAIN] Dosažen +170° (%d tiků). Otáčím se ZPĚT...\n", current_ticks);
                   direction = -1;
                   man.motor(rb::MotorId::M2).speed(0);
                   man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-current_back_speed));
@@ -714,26 +714,27 @@ void setup()
   float current_heading_raw = man.mpu().getAngleZ();
   float current_heading = current_heading_raw * gyro_polarity;
 
-  // 3. Dorovnání na 90° pomocí gyroskopu
-  // remaining_angle = 90 - current_heading
-  // Kladný = dotočit doleva, záporný = dotočit doprava
-  float remaining_angle = 90.0f - current_heading;
+  // 3. Dorovnání na cílový úhel pomocí gyroskopu
+  // Pokud jsme medvěda našli za 90° (search_angle > 90°), cílíme na 80° (radši přetočit než nedotočit)
+  // Jinak cílíme na 90°
+  float target_angle = (search_angle > 90.0f) ? 80.0f : 90.0f;
+  float remaining_angle = target_angle - current_heading;
   
   // Wrap do [-180, 180]
   while (remaining_angle > 180.0f) remaining_angle -= 360.0f;
   while (remaining_angle < -180.0f) remaining_angle += 360.0f;
   
-  logMsg("[POHYB] Dorovnání na 90°: aktuální heading=%.2f° (raw=%.2f°), zbývající otočení=%.2f°", 
-         current_heading, current_heading_raw, remaining_angle);
+  logMsg("[POHYB] Dorovnání na %.0f°: aktuální heading=%.2f° (raw=%.2f°), search_angle=%.1f°, zbývající otočení=%.2f°", 
+         target_angle, current_heading, current_heading_raw, search_angle, remaining_angle);
   
   if (remaining_angle > 2.0f) {
-      logMsg("[POHYB] Dotáčím se o %.1f° DOLEVA na 90°...", remaining_angle);
+      logMsg("[POHYB] Dotáčím se o %.1f° DOLEVA na %.0f°...", remaining_angle, target_angle);
       motors.turn_on_spot_left(remaining_angle, 40.0f);
   } else if (remaining_angle < -2.0f) {
-      logMsg("[POHYB] Dotáčím se o %.1f° DOPRAVA na 90°...", std::abs(remaining_angle));
+      logMsg("[POHYB] Dotáčím se o %.1f° DOPRAVA na %.0f°...", std::abs(remaining_angle), target_angle);
       motors.turn_on_spot_right(std::abs(remaining_angle), 40.0f);
   } else {
-      logMsg("[POHYB] Již jsme na 90° (odchylka %.2f°). Nepotřebuji se otáčet.", remaining_angle);
+      logMsg("[POHYB] Již jsme na %.0f° (odchylka %.2f°). Nepotřebuji se otáčet.", target_angle, remaining_angle);
   }
   
   // 4. Couvání k pravé stěně pro srovnání
