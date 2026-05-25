@@ -160,12 +160,23 @@ void GoHome(bool skip_initial_alignment = false){
       move.TurnRight(90);
       Serial.println("[POHYB] GoHome: Couvám ke spodní stěně bludiště pomocí back_buttons...");
       motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+      
+      Serial.println("[POHYB] GoHome: Dělám levý oblouk (poloměr 100 mm, 90 stupňů) pro odjezd od zdi...");
+      move.Arcleft(90, 100);
+      Serial.println("[POHYB] GoHome: Jedu rovně 80 mm...");
+      motors.forward_acc(80.0f, 40.0f);
   } else {
-      Serial.println("[POHYB] GoHome: Již jsme vyrovnaní u spodní stěny. Přeskakuji otočení a vyrovnání.");
+      Serial.println("[POHYB] GoHome: Již jsme vyrovnaní u spodní stěny (rychlá trasa). Přeskakuji počáteční otočení.");
+      Serial.println("[POHYB] GoHome: Dělám PRVNÍ levý oblouk (poloměr 100 mm, 90 stupňů)...");
+      move.Arcleft(90, 100);
+      
+      // Dodatečné vyrovnání o pravou stěnu (v rychlé trase jsme na spodní stěně v náhodné X pozici)
+      Serial.println("[POHYB] GoHome: Couvám k PRAVÉ stěně pomocí back_buttons...");
+      motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+      
+      Serial.println("[POHYB] GoHome: Popojíždím 300 mm dopředu (doleva) od pravé stěny pro vytvoření druhého rádiusu...");
+      motors.forward_acc(300.0f, 40.0f);
   }
-  Serial.println("[POHYB] GoHome: Dělám levý oblouk (poloměr 100 mm, 90 stupňů) pro odjezd od zdi...");
-  move.Arcleft(90, 100);
-  motors.forward_acc(80.0f, 40.0f);
   Serial.println("[POHYB] GoHome: Dělám pravý oblouk (90 stupňů, poloměr 300 mm)...");
   move.ArcRight(84, 300);
   Serial.println("[POHYB] GoHome: Jedu rovně 100 mm...");
@@ -234,6 +245,7 @@ int FindBearLeft() {
   const int target_consecutive_confirmations = 3;
   const int centered_threshold = 15; // Tolerance pro vycentrování (v mm)
   const int step_zone_threshold = 40; // Odchylka v mm, pod kterou přejdeme do krokového režimu
+  bool has_driven_halfway = false;   // Příznak, zda jsme již popojeli o polovinu cesty k medvědovi
   
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
   const int ticks_10 = max_ticks_90 * 10 / 90;
@@ -382,21 +394,44 @@ int FindBearLeft() {
                                 centered_consecutive_count + (abs(x) <= centered_threshold ? 1 : 0), 
                                 target_consecutive_confirmations, current_ticks, max_ticks_90, direction);
                   
-                  // Zkontrolujeme, jestli je medved vycentrován (v rámci tolerance +-15 mm)
-                  if (abs(x) <= centered_threshold) {
-                      centered_consecutive_count++;
-                      
-                      // Zastavíme motory pro přesné změření v klidu
-                      man.motor(rb::MotorId::M2).speed(0);
-                      man.motor(rb::MotorId::M3).speed(0);
-                      
-                      if (centered_consecutive_count >= target_consecutive_confirmations) {
-                          Serial.printf("[MAIN] Vyhledavani uspesne dokončeno! Medved potvrzen %d-krat za sebou. Koncova poloha: x=%d mm, y=%d mm, tiky=%d.\n", 
-                                        target_consecutive_confirmations, x, y, current_ticks);
-                          return current_ticks;
-                      }
-                      continue; // Přejdeme na další měření bez pohybu
-                  } else {
+                   // Zkontrolujeme, jestli je medved vycentrován (v rámci tolerance +-15 mm)
+                   if (abs(x) <= centered_threshold) {
+                       centered_consecutive_count++;
+                       
+                       // Zastavíme motory pro přesné změření v klidu
+                       man.motor(rb::MotorId::M2).speed(0);
+                       man.motor(rb::MotorId::M3).speed(0);
+                       
+                       // STRATEGICKÝ KROK: Pokud je medvěd daleko (y > 500 mm) a je zhruba vycentrován,
+                       // popojedeme o polovinu vzdálenosti blíže a začneme měřit znovu od nuly.
+                       // Tím dostaneme robota do pozice, kde je medvěd blízko a stabilně sledovatelný přes HSV.
+                       if (!has_driven_halfway && y > 400) {
+                           int half_dist = y / 2;
+                           Serial.printf("[MAIN] Detekován vzdálený medvěd (y=%d mm, x=%d mm). Popojíždím o %d mm blíže pro přesné zaměření.\n", y, x, half_dist);
+                           delay(150); // Pauza na úplné zastavení
+                           
+                           // Popojedeme dopředu rychlostí 40 %
+                           motors.forward_acc(half_dist, 40);
+                           
+                           has_driven_halfway = true;
+                           
+                           // Resetujeme gyroskop a enkodéry na novou nulu
+                           man.mpu().resetAngleZ();
+                           delay(100);
+                           man.motor(rb::MotorId::M3).setCurrentPosition(0);
+                           
+                           // Vrátíme se na začátek vyhledávání (pokus = 1)
+                           attempt = 0;
+                           break; // vyskočíme z vnitřní smyčky a vyhledávání začne znovu z nové pozice
+                       }
+                       
+                       if (centered_consecutive_count >= target_consecutive_confirmations) {
+                           Serial.printf("[MAIN] Vyhledavani uspesne dokončeno! Medved potvrzen %d-krat za sebou. Koncova poloha: x=%d mm, y=%d mm, tiky=%d.\n", 
+                                         target_consecutive_confirmations, x, y, current_ticks);
+                           return current_ticks;
+                       }
+                       continue; // Přejdeme na další měření bez pohybu
+                   } else {
                       // Pokud je chyba mimo toleranci, vynulujeme počítadlo potvrzení
                       centered_consecutive_count = 0;
                   }
@@ -751,12 +786,16 @@ void setup()
       // Znovu wrapneme výsledný úhel pro nalezení nejkratší trasy otočení
       remaining_angle = wrap_180(remaining_angle);
       
+      // Uživatelské pravidlo: Po chycení medvěda se nikdy neotáčíme doprava.
+      // Pokud je zbývající úhel záporný (přejeli jsme 90°), neotáčíme se a necháme se vyrovnat stěnou.
+      if (remaining_angle < 0) {
+          logMsg("[POHYB] Vypočtený zbývající úhel je %.2f° (záporný). Otáčení doprava je zakázáno, zůstávám stát.", remaining_angle);
+          remaining_angle = 0.0f;
+      }
+      
       if (remaining_angle > 0) {
           logMsg("[POHYB] Dotáčím se o zbývající úhel %.1f° doleva na plných 90° na místě...", remaining_angle);
           motors.turn_on_spot_left(remaining_angle, 40.0f);
-      } else if (remaining_angle < 0) {
-          logMsg("[POHYB] Přejeli jsme nebo se otáčíme doprava. Dotáčím se o %.1f° doprava na místě...", std::abs(remaining_angle));
-          motors.turn_on_spot_right(std::abs(remaining_angle), 40.0f);
       }
       
       // 3. Couvání k pravé stěně bludiště pro srovnání pomocí back_buttons (rychlost 75.0f):
