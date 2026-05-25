@@ -1,0 +1,119 @@
+#include "SmartServoBus.hpp"
+#include "RBCX.h"
+#include <Arduino.h>
+#include <thread>
+
+auto &man = rb::Manager::get(); //pro fungovani RBCX
+#include "Grabber.hpp"
+#include "Movement.hpp"
+#include "movement_my.hpp"
+
+//struktury na ovladani robota
+Grabber grabber;
+Movemennt move;
+Motors motors;
+std::unique_ptr<SmartServoBus> servoBus;
+
+bool open_grabber = false; //promena ridici otevirani grabberu v threadu 
+
+//funkce pro otevirani grabberu po ceste do hriste
+void OpenGrabberBeforeField(){
+  while (true)
+  {
+    if(open_grabber == true){
+      break;
+    }
+    delay(50);
+  }
+  delay(460);
+  Serial.println("[KLEPETA] Otevíráme klepeta do přípravné polohy (HalfOpen)...");
+  grabber.HalfOpen();
+}
+
+//funkce pro jizdu do hriste
+void GoToField(){
+  move.Acceleration(300,32000,400);
+  move.ArcRight(180,180);
+  move.Straight(32000,100,5000);
+  open_grabber = true; //tady se zacne otevirat grabber
+  move.Arcleft(163, 150);
+  move.Straight(20000, 490,4000);
+  move.Acceleration(20000, 100, 340);
+  move.Stop();
+}
+
+//funkce pro jizdu zpet do domovske pozice
+void GoHome(){
+  Serial.println("[POHYB] GoHome: Otáčím se DOPRAVA o 90 stupňů...");
+  move.TurnRight(90);
+  Serial.println("[POHYB] GoHome: Couvám ke spodní stěně bludiště pomocí back_buttons...");
+  motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+  Serial.println("[POHYB] GoHome: Dělám levý oblouk (poloměr 100 mm, 90 stupňů) pro odjezd od zdi...");
+  move.Arcleft(90, 100);
+  motors.forward_acc(80.0f, 40.0f);
+  Serial.println("[POHYB] GoHome: Dělám pravý oblouk (90 stupňů, poloměr 300 mm)...");
+  move.ArcRight(84, 300);
+  Serial.println("[POHYB] GoHome: Jedu rovně 100 mm...");
+  move.Straight(2000, 100, 99999);
+  Serial.println("[POHYB] GoHome: Dělám levý oblouk (190 stupňů, poloměr 180 mm)...");
+  move.Arcleft(190, 180);
+  Serial.println("[POHYB] GoHome: Jedu rovně 200 mm...");
+  move.Straight(2000, 200, 99999);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("[OFFLINE TEST] Inicializace...");
+
+  man.install(rb::MAN_DISABLE_MOTOR_FAILSAFE);
+
+  Serial.println("[SERVOS] Inicializace SmartServoBus...");
+  servoBus = std::make_unique<SmartServoBus>();
+  servoBus->begin(2, &man.smartServoBusBackend()); 
+  servoBus->setAutoStop(0, false);
+  servoBus->setAutoStop(1, false);
+  
+
+  Serial.println("[OFFLINE TEST] Připraven. Ovládání pomocí tlačítek na desce:");
+  Serial.println(" -> Tlačítko UP: Spustí jízdu na hřiště (GoToField)");
+  Serial.println(" -> Tlačítko DOWN: Spustí couvání na mikrospínače (back_buttons) a návrat domů (GoHome)");
+}
+
+void loop()
+{
+  // Tlačítko UP -> Jízda do hřiště (GoToField)
+  if (man.buttons().up() == 1) {
+    Serial.println("\n[OFFLINE TEST] Stisknuto tlačítko UP -> Spouštím GoToField() za 2 vteřiny...");
+      // Inicializace klepet do startovní pozice
+    grabber.Close();
+    delay(2000);
+    
+    // Spustíme otevírání klepet na pozadí v samostatném vlákně
+    open_grabber = false;
+    std::thread grabberThread(OpenGrabberBeforeField);
+    grabberThread.detach();
+    
+    GoToField();
+    Serial.println("[OFFLINE TEST] GoToField() dokončeno.");
+  }
+
+  // Tlačítko DOWN -> back_buttons + GoHome
+  if (man.buttons().down() == 1) {
+    Serial.println("\n[OFFLINE TEST] Stisknuto tlačítko DOWN -> Spouštím couvání k pravé stěně (back_buttons) za 2 vteřiny...");
+    delay(2000);
+    
+    // 1. Srovnání se stěnou pomocí back_buttons
+    Serial.println("[POHYB] Couvám k pravé stěně bludiště pro srovnání pomocí back_buttons...");
+    grabber.Grab();
+    motors.back_buttons(35.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+    
+    // 2. Jízda domů
+    Serial.println("[MAIN] Jedeme domů (GoHome)...");
+    GoHome();
+    Serial.println("[OFFLINE TEST] GoHome() dokončeno.");
+  }
+
+  delay(20);
+}

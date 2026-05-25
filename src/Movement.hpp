@@ -112,16 +112,14 @@ void TurnRight(int angle)
   int distance = ((PI * wheel_base) / 360) * angle / mm_to_ticks;
   while (distance > ticks_M3)
   {
-    man.motor(rb::MotorId::M2).speed(500);
-    man.motor(rb::MotorId::M3).speed(500);
+    man.motor(rb::MotorId::M2).speed(-500);
+    man.motor(rb::MotorId::M3).speed(-500);
     man.motor(rb::MotorId::M3).requestInfo([&ticks_M3](rb::Motor &info)
                                            {
-            //printf("M3: position:%d\n", info.position());
-            ticks_M3 = info.position(); });
+            ticks_M3 = -info.position(); });
     man.motor(rb::MotorId::M2).requestInfo([&ticks_M2](rb::Motor &info)
                                            {
-            //printf("M2: position:%d\n", info.position());
-            ticks_M2 = -info.position(); });
+            ticks_M2 = info.position(); });
 
     delay(10);
   }
@@ -138,16 +136,14 @@ void TurnLeft(int angle)
   int distance = ((PI * wheel_base) / 360) * angle / mm_to_ticks;
   while (distance > ticks_M3)
   {
-    man.motor(rb::MotorId::M2).speed(-500);
-    man.motor(rb::MotorId::M3).speed(-500);
+    man.motor(rb::MotorId::M2).speed(500);
+    man.motor(rb::MotorId::M3).speed(500);
     man.motor(rb::MotorId::M3).requestInfo([&ticks_M3](rb::Motor &info)
                                            {
-            //Serial.println( -info.position());//"M3: position:%d\n",
-            ticks_M3 = -info.position(); });
+            ticks_M3 = info.position(); });
     man.motor(rb::MotorId::M2).requestInfo([&ticks_M2](rb::Motor &info)
                                            {
-            //printf("M2: position:%d\n", info.position());
-            ticks_M2 = info.position(); });
+            ticks_M2 = -info.position(); });
 
     delay(10);
   }
@@ -211,16 +207,16 @@ void BackwardUntillWall(){
  * @param timeout: po jake dobe se ma funkce ukoncit i kdyz neujede pozadovanou vzdalenost
  * @return None
  */
-void Straight(int speed, int distance,int timeout)
+void Straight(int speed, int distance, int timeout)
 {
   man.motor(rb::MotorId::M2).setCurrentPosition(0);
   man.motor(rb::MotorId::M3).setCurrentPosition(0);
   int time = 0;
   int ticks_M2 = 0;
   int ticks_M3 = 0;
-  distance = distance / mm_to_ticks;
-  Serial.println(distance);
-  while (ticks_M2 < distance && time < timeout)
+  int target_ticks = abs(distance / mm_to_ticks);
+  Serial.printf("[POHYB] Jízda rovně: rychlost=%d, cíl_tiků=%d\n", speed, target_ticks);
+  while (abs(ticks_M2) < target_ticks && time < timeout)
   { 
     man.motor(rb::MotorId::M2).speed(-speed);
     man.motor(rb::MotorId::M3).speed(speed);

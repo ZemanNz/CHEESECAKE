@@ -681,9 +681,13 @@ inline void Motors::radius_right(float radius, float angle, float speed) {
             if (std::abs(adjusted_speed_right) < min_speed_inner && std::abs(adjusted_speed_right) > 0) {
                 adjusted_speed_right = (adjusted_speed_right > 0) ? min_speed_inner : -min_speed_inner;
             }
-            
-            // Aplikace upravených rychlostí
+        }
+        
+        // Aplikace upravených rychlostí (i po dokončení jednoho kola musí druhé kolo plynule dojet a zpomalit)
+        if (!left_done) {
             man.motor(m_id_left).speed(pctToSpeed(adjusted_speed_left));
+        }
+        if (!right_done) {
             man.motor(m_id_right).speed(pctToSpeed(adjusted_speed_right));
         }
         
@@ -860,9 +864,13 @@ inline void Motors::radius_left(float radius, float angle, float speed) {
             if (std::abs(adjusted_speed_right) < min_speed_outer && std::abs(adjusted_speed_right) > 0) {
                 adjusted_speed_right = (adjusted_speed_right > 0) ? min_speed_outer : -min_speed_outer;
             }
-            
-            // Aplikace upravených rychlostí
+        }
+        
+        // Aplikace upravených rychlostí (i po dokončení jednoho kola musí druhé kolo plynule dojet a zpomalit)
+        if (!left_done) {
             man.motor(m_id_left).speed(pctToSpeed(adjusted_speed_left));
+        }
+        if (!right_done) {
             man.motor(m_id_right).speed(pctToSpeed(adjusted_speed_right));
         }
         
@@ -924,10 +932,10 @@ inline void Motors::forward_acc(float mm, float speed) {
     float step_left = (base_speed_left > 0) ? step : -step;
     float step_right = (base_speed_right > 0) ? step : -step;
     
-    // Proměnné pro akceleraci
     float current_speed_left = (base_speed_left > 0) ? m_min_speed : -m_min_speed;
     float current_speed_right = (base_speed_right > 0) ? m_min_speed : -m_min_speed;
-    int o_kolik_drive_zpomalovat = int(60 * speed);    
+    int o_kolik_drive_zpomalovat = int(10 * speed);    
+    o_kolik_drive_zpomalovat = std::min(o_kolik_drive_zpomalovat, int(0.35f * std::min(target_ticks_left, target_ticks_right)));
     unsigned long start_time = millis();
     int timeoutMs = 1.7 * timeout_ms(mm, speed * 0.8);
 
@@ -1072,8 +1080,8 @@ inline void Motors::backward_acc(float mm, float speed) {
     float current_speed_left = (base_speed_left > 0) ? m_min_speed : -m_min_speed;
     float current_speed_right = (base_speed_right > 0) ? m_min_speed : -m_min_speed;
     
-    // Proměnné pro akceleraci
-    int o_kolik_drive_zpomalovat = int(60 * speed);    
+    int o_kolik_drive_zpomalovat = int(10 * speed);    
+    o_kolik_drive_zpomalovat = std::min(o_kolik_drive_zpomalovat, int(0.35f * std::min(target_ticks_left, target_ticks_right)));
     unsigned long start_time = millis();
     int timeoutMs = 1.7 * timeout_ms(mm, speed * 0.8);
 

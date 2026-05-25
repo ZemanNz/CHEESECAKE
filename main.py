@@ -315,7 +315,20 @@ while True:
                 hsv_bear_data = None
 
     # Určení finálních dat medvěda pro tento snímek
-    if hsv_tracked:
+    is_valid_hsv = False
+    if hsv_tracked and cur_yolo_data is not None:
+        yolo_area = cur_yolo_data[2] * cur_yolo_data[3]
+        hsv_area = hsv_bear_data_local[2] * hsv_bear_data_local[3]
+        # Poměr plochy: HSV plocha musí být alespoň 1/4 (25 %) plochy YOLO
+        if yolo_area > 0 and (hsv_area / yolo_area) >= 0.25:
+            is_valid_hsv = True
+        else:
+            print(f"[RPi MAIN] HSV odfiltrováno kvůli velikosti: HSV plocha={hsv_area}, YOLO plocha={yolo_area}, poměr={hsv_area/yolo_area if yolo_area > 0 else 0:.2f}")
+    elif hsv_tracked:
+        # Povolit HSV bez porovnání, pokud ještě nemáme YOLO data
+        is_valid_hsv = True
+
+    if is_valid_hsv:
         last_bear_data = hsv_bear_data_local
         tracker_mode = "HSV"
     else:
@@ -325,14 +338,20 @@ while True:
     # Výpočet souřadnic v centimetrech
     x_cm_out, y_cm_out = None, None
     if last_bear_data is not None:
-        x, y, w, h = last_bear_data
+        # Hloubku (Y) počítáme VŽDY z modelu (preferujeme stabilnější YOLO), abychom předešli nestabilitě z menšího HSV boxu
+        y_source_data = cur_yolo_data if cur_yolo_data is not None else last_bear_data
+        
+        x, y, w, h = last_bear_data  # Pro centering (X) a kreslení
+        y_x, y_y, y_w, y_h = y_source_data  # Pro výpočet vzdálenosti (Y)
         
         # Přepočet souřadnic ze 640x480 na virtuální 960x640 pro zachování kalibrace
         x_960 = x * 1.5
-        y_bottom_960 = (y + round(h/2)) * (640.0 / 480.0)
+        y_bottom_960 = (y_y + round(y_h/2)) * (640.0 / 480.0)
         relative_x = x_960 - 480
         relative_y_bottom = 690 - y_bottom_960
         y_cm = 0.07895052 * np.e**(0.02147171 * relative_y_bottom) + 35.468015
+        
+        # Odchylku X spočítáme pomocí rychlého trackování (HSV pro maximální přesnost v ose)
         x_cm = px_to_cm_x_offset(relative_x, y_cm, frame_width=960)
         x_cm_out, y_cm_out = x_cm, y_cm
         

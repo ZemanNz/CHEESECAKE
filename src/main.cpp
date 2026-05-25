@@ -32,9 +32,9 @@ void GoToField(){
   move.ArcRight(180,180);
   move.Straight(32000,100,5000);
   open_grabber = true; //tady se zacne otevirat grabber
-  move.Arcleft(168, 150);
-  move.Straight(20000, 410,4000);
-  move.Acceleration(20000, 100, 320);
+  move.Arcleft(163, 150);
+  move.Straight(20000, 490,4000);
+  move.Acceleration(20000, 100, 340);
   move.Stop();
 }
 
@@ -138,12 +138,13 @@ void GoForBear(int x, int y){
 void GoHome(){
   Serial.println("[POHYB] GoHome: Otáčím se DOPRAVA o 90 stupňů...");
   move.TurnRight(90);
-  Serial.println("[POHYB] GoHome: Couvám ke spodní stěně bludiště...");
-  move.BackwardUntillWall();
-  Serial.println("[POHYB] GoHome: Jedu rovně 150 mm...");
-  move.Straight(2000, 150, 99999);
+  Serial.println("[POHYB] GoHome: Couvám ke spodní stěně bludiště pomocí back_buttons...");
+  motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+  Serial.println("[POHYB] GoHome: Dělám levý oblouk (poloměr 100 mm, 90 stupňů) pro odjezd od zdi...");
+  move.Arcleft(90, 100);
+  motors.forward_acc(80.0f, 40.0f);
   Serial.println("[POHYB] GoHome: Dělám pravý oblouk (90 stupňů, poloměr 300 mm)...");
-  move.ArcRight(90, 300);
+  move.ArcRight(84, 300);
   Serial.println("[POHYB] GoHome: Jedu rovně 100 mm...");
   move.Straight(2000, 100, 99999);
   Serial.println("[POHYB] GoHome: Dělám levý oblouk (190 stupňů, poloměr 180 mm)...");
@@ -204,7 +205,7 @@ int FindBearLeft() {
   // Výpočet tiků pro přesně 90 stupňů: (PI * wheel_base) / (2.0 * mm_to_ticks)
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
   
-  Serial.printf("[MAIN] Zacinam plynule vyhledavani medveda (max 90 stupnu = %d tiků)...\n", max_ticks_90);
+  Serial.printf("[MAIN] Zacinam plynule obousmerne vyhledavani medveda (max 90 stupnu = %d tiků)...\n", max_ticks_90);
 
   // Vyčistíme stará data z bufferu přijímače, abychom nezastavili na starých datech
   message.clearRxBuffer();
@@ -213,6 +214,7 @@ int FindBearLeft() {
   man.motor(rb::MotorId::M3).setCurrentPosition(0);
 
   // Spustíme počáteční otáčení doleva (pouze pravým kolem, levé stojí na místě)
+  int direction = 1; // 1 = doleva (vpřed), -1 = doprava (zpět k nule)
   man.motor(rb::MotorId::M2).speed(0);
   man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(search_speed));
   
@@ -229,22 +231,16 @@ int FindBearLeft() {
           last_info_time = millis();
       }
       
-      // Pokud ujedeme více než 90 stupňů a medvěd nikde, vrátíme se zpět a ohlásíme chybu
-      if (current_ticks > max_ticks_90) {
-          Serial.printf("[MAIN] Překročen limit 90 stupňů (%d tiků). Medvěd nenalezen. Otáčím se zpět...\n", current_ticks);
+      // Kontrola limitů otáčení v závislosti na směru hledání
+      if (direction == 1 && current_ticks > max_ticks_90) {
+          Serial.printf("[MAIN] Dosažen limit 90° (%d tiků). Medvěd nenalezen. Otáčím se ZPĚT a stále hledám...\n", current_ticks);
+          direction = -1;
           man.motor(rb::MotorId::M2).speed(0);
           man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-search_speed));
-          
-          uint32_t last_reverse_info = 0;
-          while (current_ticks > 5) {
-              if (millis() - last_reverse_info > 20) {
-                  man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
-                      current_ticks = info.position();
-                  });
-                  last_reverse_info = millis();
-              }
-              delay(10);
-          }
+      } 
+      else if (direction == -1 && current_ticks < 5) {
+          Serial.println("[MAIN] Vráceno na výchozí pozici 0°. Medvěd nebyl nalezen ani při zpětném chodu. Končím.");
+          man.motor(rb::MotorId::M2).speed(0);
           man.motor(rb::MotorId::M3).speed(0);
           return -1;
       }
@@ -262,10 +258,10 @@ int FindBearLeft() {
               int y = message.y_distance;
 
               // Diagnostický výpis přijatých dat z Raspberry Pi
-              Serial.printf("[MAIN RX] Zprava z RPi: x=%d mm, y=%d mm, dist=%d mm, cam=%d, on=%d, shoda=%d/%d, tiky=%d/%d\n", 
+              Serial.printf("[MAIN RX] Zprava z RPi: x=%d mm, y=%d mm, dist=%d mm, cam=%d, on=%d, shoda=%d/%d, tiky=%d/%d, smer=%d\n", 
                             x, y, message.msg.distance, message.msg.camera, message.msg.on, 
                             centered_consecutive_count + (abs(x) <= centered_threshold ? 1 : 0), 
-                            target_consecutive_confirmations, current_ticks, max_ticks_90);
+                            target_consecutive_confirmations, current_ticks, max_ticks_90, direction);
               
               // Zkontrolujeme, jestli je medved vycentrován (v rámci tolerance +-15 mm)
               if (abs(x) <= centered_threshold) {
@@ -409,48 +405,32 @@ void setup()
   grabber.Open();
   
   // Jízda pro medvěda:
-  int y_target = message.y_distance * 10; // převod na mm
-  Serial.printf("[POHYB] Jedeme rovně %d mm k medvědovi.\n", y_target);
-  move.Straight(2000, y_target, 4000);
-  move.Stop();
+  int y_target = message.y_distance + 200; // Přidána 15 cm (150 mm) rezerva
+  Serial.printf("[POHYB] Jedeme rovně %d mm k medvědovi s akcelerací (včetně 150 mm rezervy).\n", y_target);
+  motors.forward_acc(y_target, 80);
   
   Serial.println("[KLEPETA] Zavíráme klepeta (chytáme medvěda)...");
   grabber.Grab();
   delay(1200); // aby se klepeta stihla zavřít
   
-  // Návrat na otočný bod:
-  Serial.printf("[POHYB] Couvám %d mm zpět na otočný bod.\n", y_target);
-  move.Straight(-2000, y_target, 4000);
-  move.Stop();
+  // 1. Odcouvání 10 cm s akcelerací
+  Serial.println("[POHYB] Couvám 100 mm zpět s akcelerací...");
+  motors.backward_acc(100.0f, 30.0f);
   
-  // Otočení do plných 90 stupňů: (PI * wheel_base) / (2.0 * mm_to_ticks)
+  // 2. Natočení se na 90 stupňů k pravé stěně pomocí turn_on_spot_left
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
-  int remaining_ticks = max_ticks_90 - search_ticks;
-  Serial.printf("[POHYB] Otáčím se o zbývající úhel do 90 stupňů (zbývá %d tiků)...\n", remaining_ticks);
-  
-  man.motor(rb::MotorId::M2).speed(0);
-  man.motor(rb::MotorId::M3).setCurrentPosition(0);
-  man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(6.0f)); // 6.0 % rychlost hledání
-  
-  int temp_ticks = 0;
-  uint32_t last_temp_info = 0;
-  while (temp_ticks < remaining_ticks) {
-      if (millis() - last_temp_info > 20) {
-          man.motor(rb::MotorId::M3).requestInfo([&temp_ticks](rb::Motor &info) {
-              temp_ticks = info.position();
-          });
-          last_temp_info = millis();
-      }
-      delay(10);
+  float search_angle = (search_ticks * 90.0f) / max_ticks_90;
+  float remaining_angle = 90.0f - search_angle;
+  if (remaining_angle > 0) {
+      Serial.printf("[POHYB] Dotáčím se o zbývající úhel %.1f° doleva na plných 90° na místě...\n", remaining_angle);
+      motors.turn_on_spot_left(remaining_angle, 40.0f);
   }
-  man.motor(rb::MotorId::M3).speed(0);
   
-  // Nyní jsme natočeni kolmo (90 stupňů) ke stěně.
-  // Zacouváme k pravé stěně, čímž se o ni dokonale srovnáme:
-  Serial.println("[POHYB] Couvám k pravé stěně bludiště pro srovnání...");
-  move.BackwardUntillWall();
+  // 3. Couvání k pravé stěně bludiště pro srovnání pomocí back_buttons (rychlost 75.0f):
+  Serial.println("[POHYB] Couvám k pravé stěně bludiště pro srovnání pomocí back_buttons...");
+  motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
   
-  // Nyní jsme vyrovnaní u pravé stěny bludiště a jedeme domů
+  // 4. Nyní jsme vyrovnaní u pravé stěny bludiště a jedeme domů
   Serial.println("[MAIN] Jedeme domů (GoHome)...");
   GoHome();
   Serial.println("[MAIN] Robot dojel domů. Konec programu.");
