@@ -133,7 +133,8 @@ def click_event(event, x, y, flags, param):
 
 
 # === Konfigurace hybridního trackeru ===
-CROP_Y = 240         # Oříznutí horní části obrazu (nastaveno na 240 pro dolní polovinu ze 480 px)
+CROP_Y_YOLO = 180     # Oříznutí pro YOLO (dolních 300 px ze 480 px, abychom viděli i hlavu medvěda)
+CROP_Y_HSV = 240      # Oříznutí pro HSV (dolních 240 px ze 480 px pro stabilní sledování těla)
 HSV_H_TOL = 20       # Tolerance Hue pro barevnou masku
 HSV_S_TOL = 75       # Tolerance Saturation
 HSV_V_TOL = 75       # Tolerance Value
@@ -146,25 +147,28 @@ track_color = None        # Průměrná HSV barva medvěda
 have_color = False        # Indikátor, zda máme platnou barvu pro HSV tracking
 yolo_bear_data = None     # Poslední data nalezená YOLO (cx, cy, w, h) v 640x480 souřadnicích
 hsv_bear_data = None      # Poslední data nalezená HSV (cx, cy, w, h) v 640x480 souřadnicích
+ref_yolo_x = None         # Globální reference X souřadnice středu medvěda z YOLO
+ref_yolo_w = None         # Globální reference šířky medvěda z YOLO
+ref_yolo_h = None         # Globální reference výšky medvěda z YOLO
 
 
 def detector_thread():
-    """Vlákno na pozadí běžící 1x za sekundu, které spouští YOLO na oříznutém obrázku."""
+    """Vlákno na pozadí běžící nepřetržitě s minimální pauzou, které spouští YOLO na oříznutém obrázku."""
     global latest_frame, track_color, have_color, yolo_bear_data
     print("[RPi YOLO Thread] Detekční vlákno na pozadí spuštěno.")
     while True:
-        time.sleep(1.0)
+        time.sleep(0.05)  # Pauza 50ms mezi běhy pro rychlou odezvu (cca 5-7 FPS na RPi CPU)
         
         with frame_lock:
             if latest_frame is None:
                 continue
             frame_copy = latest_frame.copy()
             
-        # Oříznutí horních CROP_Y pixelů (např. 320 px)
-        cropped_img = frame_copy[CROP_Y:480, 0:640]
+        # Oříznutí pro YOLO (dolních 300 px)
+        cropped_img = frame_copy[CROP_Y_YOLO:480, 0:640]
         
-        # YOLO inference na malém výřezu je extrémně rychlá
-        results = model.predict(cropped_img, verbose=False)
+        # YOLO inference s explicitně nastaveným prahem spolehlivosti na 16 % (conf=0.16)
+        results = model.predict(cropped_img, imgsz=320, conf=0.16, verbose=False)
         result = results[0]
         
         bear_found = False
@@ -176,7 +180,7 @@ def detector_thread():
                 
                 # Přepočet souřadnic středu zpět do celého obrazu 640x480
                 cx = x_crop
-                cy = y_crop + CROP_Y
+                cy = y_crop + CROP_Y_YOLO
                 
                 # Získání průměrné HSV barvy medvěda z malého okolí středu v oříznutém snímku
                 hsv_cropped = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
@@ -184,16 +188,18 @@ def detector_thread():
                 x_lo = max(0, x_crop - r)
                 x_hi = min(640, x_crop + r + 1)
                 y_lo = max(0, y_crop - r)
-                y_hi = min(480 - CROP_Y, y_crop + r + 1)
+                y_hi = min(480 - CROP_Y_YOLO, y_crop + r + 1)
                 
                 roi = hsv_cropped[y_lo:y_hi, x_lo:x_hi]
                 if roi.size > 0:
                     h_val, s_val, v_val, _ = cv2.mean(roi)
+                    conf = float(box.conf[0])
                     
                     with data_lock:
                         track_color = (h_val, s_val, v_val)
                         have_color = True
                         yolo_bear_data = (cx, cy, w, h)
+                    print(f"[RPi YOLO Thread] Medvěd nalezen! Spolehlivost (Conf) = {conf * 100:.1f} %")
                     bear_found = True
                     break
                     
@@ -218,6 +224,9 @@ det_thread = threading.Thread(target=detector_thread, daemon=True)
 det_thread.start()
 
 waiting_for_robot = True
+last_fps_time = time.time()
+fps_counter = 0
+fps = 0
 print("[RPi MAIN] RPi je pripraveno. Klikni na tlacitko START v okne kamery.")
 
 while True:
@@ -238,12 +247,13 @@ while True:
             if line:
                 print(f"[RPi UART RX] Přijato od robota: '{line}'")
                 if "inposition" in line:
-                    waiting_for_robot = False
-                    print("\n[RPi MAIN] --- ROBOT JE NA MISTE ---")
-                    print("[RPi MAIN] Zacinam vyhodnocovat snimky naplno (max FPS)...")
-                    # Vymazání fronty pro čistý snímek
-                    for _ in range(5):
-                        cap.read()
+                    if waiting_for_robot:
+                        waiting_for_robot = False
+                        print("\n[RPi MAIN] --- ROBOT JE NA MISTE ---")
+                        print("[RPi MAIN] Zacinam vyhodnocovat snimky naplno (max FPS)...")
+                        # Vymazání fronty pro čistý snímek
+                        for _ in range(5):
+                            cap.read()
         except Exception as e:
             print(f"[RPi UART RX] Chyba při čtení: {e}")
             
@@ -262,7 +272,7 @@ while True:
     hsv_bear_data_local = None
 
     if cur_have_color and cur_color is not None:
-        cropped_img = image[CROP_Y:480, 0:640]
+        cropped_img = image[CROP_Y_HSV:480, 0:640]
         cropped_hsv = cv2.cvtColor(cropped_img, cv2.COLOR_BGR2HSV)
         
         h, s, v = cur_color
@@ -300,7 +310,7 @@ while True:
                         
         if bestPt is not None:
             cx = bestPt[0]
-            cy = bestPt[1] + CROP_Y
+            cy = bestPt[1] + CROP_Y_HSV
             w = bestBox[2]
             h = bestBox[3]
             hsv_bear_data_local = (cx, cy, w, h)
@@ -314,19 +324,42 @@ while True:
             with data_lock:
                 hsv_bear_data = None
 
+    # Pokud máme novou YOLO detekci, uložíme si ji jako dlouhodobou referenci (pozici středu i rozměry)
+    if cur_yolo_data is not None:
+        ref_yolo_x = cur_yolo_data[0]
+        ref_yolo_w = cur_yolo_data[2]
+        ref_yolo_h = cur_yolo_data[3]
+
     # Určení finálních dat medvěda pro tento snímek
     is_valid_hsv = False
-    if hsv_tracked and cur_yolo_data is not None:
-        yolo_area = cur_yolo_data[2] * cur_yolo_data[3]
-        hsv_area = hsv_bear_data_local[2] * hsv_bear_data_local[3]
-        # Poměr plochy: HSV plocha musí být alespoň 1/4 (25 %) plochy YOLO
-        if yolo_area > 0 and (hsv_area / yolo_area) >= 0.25:
+    if hsv_tracked and ref_yolo_x is not None and ref_yolo_w is not None and ref_yolo_h is not None:
+        hsv_x, hsv_y, hsv_w, hsv_h = hsv_bear_data_local
+        ref_yolo_area = ref_yolo_w * ref_yolo_h
+        hsv_area = hsv_w * hsv_h
+        ratio = hsv_area / ref_yolo_area if ref_yolo_area > 0 else 0
+        
+        # Kontrola překryvu v ose X
+        yolo_x_min = ref_yolo_x - ref_yolo_w / 2
+        yolo_x_max = ref_yolo_x + ref_yolo_w / 2
+        hsv_x_min = hsv_x - hsv_w / 2
+        hsv_x_max = hsv_x + hsv_w / 2
+        overlaps_x = (yolo_x_min <= hsv_x_max) and (hsv_x_min <= yolo_x_max)
+        
+        # Ochrana: Obdélníky se musí překrývat v X (hledáme stejný sloupec v obraze)
+        # a zároveň HSV plocha/rozměry nesmí překročit 1.5x referenčního YOLO (volnější limit pro plynulé sledování)
+        if ref_yolo_area > 0 and 0.2 <= ratio <= 1.5 and hsv_w <= 1.5 * ref_yolo_w and hsv_h <= 1.5 * ref_yolo_h and overlaps_x:
             is_valid_hsv = True
         else:
-            print(f"[RPi MAIN] HSV odfiltrováno kvůli velikosti: HSV plocha={hsv_area}, YOLO plocha={yolo_area}, poměr={hsv_area/yolo_area if yolo_area > 0 else 0:.2f}")
+            reason = ""
+            if not (0.2 <= ratio <= 1.5): reason += f"ratio={ratio:.2f} "
+            if hsv_w > 1.5 * ref_yolo_w: reason += f"hsv_w={hsv_w}>{1.5*ref_yolo_w:.1f} "
+            if hsv_h > 1.5 * ref_yolo_h: reason += f"hsv_h={hsv_h}>{1.5*ref_yolo_h:.1f} "
+            if not overlaps_x: reason += "no_x_overlap "
+            print(f"[RPi MAIN] HSV odfiltrováno kvůli: {reason}(HSV area={hsv_area} W={hsv_w} H={hsv_h}, Ref YOLO area={ref_yolo_area} W={ref_yolo_w} H={ref_yolo_h})")
     elif hsv_tracked:
-        # Povolit HSV bez porovnání, pokud ještě nemáme YOLO data
-        is_valid_hsv = True
+        # Pokud nemáme žádná referenční YOLO data z historie, barevný tracking nepovolíme
+        is_valid_hsv = False
+        print(f"[RPi MAIN] HSV odfiltrováno - chybí referenční rozměry YOLO (ref_yolo_w/h je None)")
 
     if is_valid_hsv:
         last_bear_data = hsv_bear_data_local
@@ -334,6 +367,13 @@ while True:
     else:
         last_bear_data = cur_yolo_data
         tracker_mode = "YOLO"
+
+    # Podrobný výpis velikostí boxů do konzole pro diagnostiku přes terminál
+    if cur_yolo_data is not None or hsv_bear_data_local is not None or ref_yolo_w is not None:
+        yolo_str = f"{cur_yolo_data[2]}x{cur_yolo_data[3]} (A={cur_yolo_data[2]*cur_yolo_data[3]})" if cur_yolo_data is not None else "None"
+        hsv_str = f"{hsv_bear_data_local[2]}x{hsv_bear_data_local[3]} (A={hsv_bear_data_local[2]*hsv_bear_data_local[3]})" if hsv_bear_data_local is not None else "None"
+        ref_str = f"{ref_yolo_w}x{ref_yolo_h} (A={ref_yolo_w*ref_yolo_h})" if ref_yolo_w is not None else "None"
+        print(f"[RPi DEBUG] Režim: {tracker_mode} | Aktuální YOLO: {yolo_str} | Referenční YOLO: {ref_str} | HSV: {hsv_str} | Valid HSV: {is_valid_hsv}")
 
     # Výpočet souřadnic v centimetrech
     x_cm_out, y_cm_out = None, None
@@ -364,14 +404,17 @@ while True:
         cv2.line(image, (320, 0), (320, 480), (255, 0, 0), 1)
         cv2.line(image, (0, 240), (640, 240), (255, 0, 0), 1)
 
-        # Text s vypočtenou vzdáleností
-        text = f"Mode: {tracker_mode} X: {x_cm:.1f} cm, Y: {y_cm:.1f} cm"
+        # Text s vypočtenou vzdáleností a FPS
+        text = f"Mode: {tracker_mode} | FPS: {fps} | X: {x_cm:.1f} cm, Y: {y_cm:.1f} cm"
         font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.putText(image, text, (image.shape[1] - 320, image.shape[0] - 20), font, 0.6, (0, 255, 255), 2)
+        cv2.putText(image, text, (image.shape[1] - 400, image.shape[0] - 20), font, 0.5, (0, 255, 255), 2)
 
-    # Vykreslení hranice ořezu
-    cv2.line(image, (0, CROP_Y), (640, CROP_Y), (0, 255, 255), 2)
-    cv2.putText(image, "Hranice orezu", (10, CROP_Y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+    # Vykreslení hranice ořezu pro YOLO a HSV
+    cv2.line(image, (0, CROP_Y_YOLO), (640, CROP_Y_YOLO), (255, 165, 0), 1)  # Oranžová pro YOLO (300 px)
+    cv2.putText(image, "YOLO hranice (300px)", (10, CROP_Y_YOLO - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 165, 0), 1)
+    
+    cv2.line(image, (0, CROP_Y_HSV), (640, CROP_Y_HSV), (0, 255, 255), 1)   # Žlutá pro HSV (240 px)
+    cv2.putText(image, "HSV hranice (240px)", (10, CROP_Y_HSV - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
     # Vykreslování stavového UI (semafor) vlevo nahore
     if not started:
@@ -401,6 +444,13 @@ while True:
             with data_lock:
                 yolo_bear_data = None
                 hsv_bear_data = None
+
+    # Výpočet FPS
+    fps_counter += 1
+    if time.time() - last_fps_time >= 1.0:
+        fps = fps_counter
+        fps_counter = 0
+        last_fps_time = time.time()
 
     ShowImage(image)
     if cv2.waitKey(1) & 0xFF == ord('q'):
