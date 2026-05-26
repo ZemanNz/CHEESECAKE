@@ -151,6 +151,11 @@ ref_yolo_x = None         # Globální reference X souřadnice středu medvěda 
 ref_yolo_w = None         # Globální reference šířky medvěda z YOLO
 ref_yolo_h = None         # Globální reference výšky medvěda z YOLO
 
+# Globální proměnné pro úhly z gyroskopu robota
+gyro_initial = 0.0
+gyro_bear = 0.0
+gyro_current = 0.0
+
 
 def detector_thread():
     """Vlákno na pozadí běžící nepřetržitě s minimální pauzou, které spouští YOLO na oříznutém obrázku."""
@@ -254,6 +259,15 @@ while True:
                         # Vymazání fronty pro čistý snímek
                         for _ in range(5):
                             cap.read()
+                elif line.startswith("gyro:"):
+                    parts = line.split(":")[-1].split(",")
+                    if len(parts) == 3:
+                        try:
+                            gyro_initial = float(parts[0])
+                            gyro_bear = float(parts[1])
+                            gyro_current = float(parts[2])
+                        except ValueError:
+                            pass
         except Exception as e:
             print(f"[RPi UART RX] Chyba při čtení: {e}")
             
@@ -416,6 +430,10 @@ while True:
     
     cv2.line(image, (0, CROP_Y_HSV), (640, CROP_Y_HSV), (0, 255, 255), 1)   # Žlutá pro HSV (240 px)
     cv2.putText(image, "HSV hranice (240px)", (10, CROP_Y_HSV - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+
+    # Vykreslení telemetry úhlů gyroskopu
+    gyro_text = f"Gyro - Init: {gyro_initial:.2f} | Bear: {gyro_bear:.2f} | Curr: {gyro_current:.2f}"
+    cv2.putText(image, gyro_text, (20, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
     # Vykreslování stavového UI (semafor) vlevo nahore
     if not started:

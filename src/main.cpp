@@ -29,6 +29,63 @@ Communication message;
 Movemennt move;
 Motors motors;
 
+uint32_t gyro_reset_time = 0;
+float gyro_z_offset = 0.0f;
+float gyro_polarity = 1.0f;
+float gyro_bear_angle = 0.0f;
+float gyro_accumulated_offset = 0.0f;
+float first_search_angle = 0.0f;
+bool first_search_angle_saved = false;
+
+float getGyroAngleZ() {
+    float raw = man.mpu().getAngleZ();
+    float dt = (millis() - gyro_reset_time) / 1000.f;
+    return raw - (gyro_z_offset * dt);
+}
+
+float getAbsoluteGyroAngleZ() {
+    return gyro_accumulated_offset + getGyroAngleZ();
+}
+
+void resetGyroZ() {
+    if (gyro_reset_time != 0) {
+        gyro_accumulated_offset += getGyroAngleZ();
+    }
+    man.mpu().resetAngleZ();
+    gyro_reset_time = millis();
+}
+
+void gyro_sender_task(void *pvParameters) {
+    while (true) {
+        float current_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
+        Serial1.printf("gyro:0.00,%.2f,%.2f\n", gyro_bear_angle, current_angle);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+
+void calibrateGyro() {
+    Serial.println("[GYRO] Inicializace MPU (gyroskopu)...");
+    man.mpu().init();
+    man.mpu().sendStart();
+    Serial.println("[GYRO] Čekám 1 sekundu na stabilizaci gyroskopických dat...");
+    delay(1000);
+    
+    Serial.println("[GYRO] Spouštím přesnou kalibraci driftu (UDRŽUJTE ROBOTA V KLIDU)...");
+    man.mpu().clearCalibrationData();
+    delay(100);
+    man.mpu().setCalibrationData();
+    delay(100);
+    
+    float sum = 0.0f;
+    const int samples = 100;
+    for (int i = 0; i < samples; i++) {
+        sum += man.mpu().getGyroZ();
+        delay(20);
+    }
+    gyro_z_offset = sum / (float)samples;
+    Serial.printf("[GYRO] Kalibrace dokončena. Změřený zbytkový drift: %.4f °/s\n", gyro_z_offset);
+}
+
 // IR senzory na GPIO 27 a 14
 const uint8_t IR_PIN_1 = 27;
 const uint8_t IR_PIN_2 = 14;
@@ -249,6 +306,9 @@ int FindBear() {
   const int step_zone_threshold = 40; // Odchylka v mm, pod kterou přejdeme do krokového režimu
   bool has_driven_halfway = false;   // Příznak, zda jsme již popojeli o polovinu cesty k medvědovi
   
+  first_search_angle = 0.0f;
+  first_search_angle_saved = false;
+  
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
   const int ticks_10 = max_ticks_90 * 10 / 90;
   
@@ -263,8 +323,75 @@ int FindBear() {
           // Pokus 1: Otočíme se 10° doprava a pak zametáme 180° doleva (-10° až +170°)
           Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah -10° až +170°");
           
-          Serial.println("[MAIN] Otáčím se 10° DOPRAVA pro pokrytí pravého boku...");
-          motors.turn_on_spot_right(10, 40.0f);
+          Serial.println("[MAIN] Otáčím se pomalu 10° DOPRAVA pouze pravým kolem (s detekcí)...");
+          resetGyroZ();
+          
+          // Vyčistíme předchozí zprávy, abychom nereagovali na stará/stojící data
+          message.clearRxBuffer();
+          
+          // Pravé kolo jede dozadu (speed = -4%), levé stojí (speed = 0)
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-4));
+          
+          uint32_t pre_turn_send_time = 0;
+          bool bear_found_pre_turn = false;
+          
+          while (std::abs(getGyroAngleZ()) < 10.0f) {
+              // Posíláme inposition do RPi
+              if (millis() - pre_turn_send_time > 100) {
+                  message.SendInPosstionMessage();
+                  pre_turn_send_time = millis();
+              }
+              
+              // Zpracování zpráv z RPi
+              if (message.receiveMessage()) {
+                  if (message.msg.x != 0 || message.msg.y != 0 || message.msg.distance != 0) {
+                      int x = message.x_distance;
+                      int y = message.y_distance;
+                      
+                      Serial.printf("[PRE-TURN RX] Nalezen medvěd během počátečního otáčení: x=%d mm, y=%d mm\n", x, y);
+                      
+                      if (std::abs(x) <= centered_threshold) {
+                          centered_consecutive_count++;
+                          if (centered_consecutive_count >= target_consecutive_confirmations) {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(0);
+                              Serial.printf("[PRE-TURN] Medvěd vycentrován a potvrzen! x=%d, y=%d\n", x, y);
+                              bear_found_pre_turn = true;
+                              break;
+                          }
+                      } else {
+                          centered_consecutive_count = 0;
+                          // Jemná korekce směru
+                          if (x > 0) {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-min_speed));
+                          } else {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(min_speed));
+                          }
+                      }
+                  }
+              }
+              delay(10);
+          }
+          
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          
+          if (bear_found_pre_turn) {
+              int current_ticks = 0;
+              man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
+                  current_ticks = info.position();
+              });
+              delay(100);
+              if (!first_search_angle_saved) {
+                  first_search_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
+                  first_search_angle_saved = true;
+                  Serial.printf("[GYRO SAVED] Ukládám první úhel nalezení (v pre-turnu): %.2f°\n", first_search_angle);
+              }
+              return current_ticks;
+          }
           
           // Nastavíme enkodér na -ticks_10 (jsme nyní na -10°)
           man.motor(rb::MotorId::M3).setCurrentPosition(-ticks_10);
@@ -280,7 +407,7 @@ int FindBear() {
           motors.forward_acc(300, 35);
           
           // Reset gyro a enkodéry
-          man.mpu().resetAngleZ();
+          resetGyroZ();
           delay(100);
           man.motor(rb::MotorId::M3).setCurrentPosition(0);
           
@@ -409,9 +536,14 @@ int FindBear() {
                           int half_dist = y / 2;
                           Serial.printf("[MAIN] Vzdálený medvěd (y=%d mm). Popojíždím o %d mm blíže.\n", y, half_dist);
                           delay(150);
+                          if (!first_search_angle_saved) {
+                              first_search_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
+                              first_search_angle_saved = true;
+                              Serial.printf("[GYRO SAVED] Ukládám první úhel nalezení (před přiblížením): %.2f°\n", first_search_angle);
+                          }
                           motors.forward_acc(half_dist, 40);
                           has_driven_halfway = true;
-                          man.mpu().resetAngleZ();
+                          resetGyroZ();
                           delay(100);
                           man.motor(rb::MotorId::M3).setCurrentPosition(0);
                           attempt = 0;
@@ -421,6 +553,11 @@ int FindBear() {
                       if (centered_consecutive_count >= target_consecutive_confirmations) {
                           Serial.printf("[MAIN] Medvěd potvrzen %dx! x=%d, y=%d, tiky=%d.\n", 
                                         target_consecutive_confirmations, x, y, current_ticks);
+                          if (!first_search_angle_saved) {
+                              first_search_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
+                              first_search_angle_saved = true;
+                              Serial.printf("[GYRO SAVED] Ukládám první úhel nalezení: %.2f°\n", first_search_angle);
+                          }
                           return current_ticks;
                       }
                       continue;
@@ -483,15 +620,9 @@ void setup()
   //pro fungovani RBCX (vypneme failsafe, protože vyhledávání blokuje na UART zprávách)
   man.install(rb::MAN_DISABLE_MOTOR_FAILSAFE);
 
-  // Inicializace MPU (gyroskopu)
-  Serial.println("[MAIN] Inicializace MPU (gyroskopu)...");
-  man.mpu().init();
-  man.mpu().sendStart();
-  Serial.println("[MAIN] Čekám 1 sekundu na ustálení gyroskopických dat...");
-  delay(1000);
-  man.mpu().setCalibrationData(); // Zkalibruje offsety (robot musí být v klidu!)
-  man.mpu().resetAngleZ();
-  Serial.println("[MAIN] Gyroskop úspěšně zkalibrován.");
+  // Inicializace MPU (gyroskopu) s přesnou kalibrací driftu
+  calibrateGyro();
+  resetGyroZ();
 
   // Inicializace infračervených senzorů jako ve Fotonovi
   pinMode(IR_PIN_1, INPUT);
@@ -509,6 +640,10 @@ void setup()
   // Zapneme komunikaci s RPi (na vyhrazenem Serial1)
   Serial.println("[MAIN] Spouštím trvalou komunikaci s Raspberry Pi (Serial1)...");
   message.start();
+
+  // Spustíme pozadový úkol pro odesílání gyroskopu na Raspberry Pi
+  xTaskCreate(gyro_sender_task, "gyro_sender_task", 2048, NULL, 1, NULL);
+  Serial.println("[MAIN] Pozadový úkol gyro_sender_task spuštěn.");
 
 //po zapnuti ceka na zpravu od Raspberry Pi ze je ready
 //message.WaitForReadyMessage();
@@ -550,7 +685,7 @@ void setup()
     if (millis() - last_setup_ir_print > 500) {
       int val1 = analogRead(IR_PIN_1);
       int val2 = analogRead(IR_PIN_2);
-      float angleZ = man.mpu().getAngleZ();
+      float angleZ = getGyroAngleZ();
       Serial.printf("[SETUP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f°\n", val1, val2, angleZ);
       last_setup_ir_print = millis();
     }
@@ -575,10 +710,12 @@ void setup()
   grabber.HalfOpen();
 
   Serial.println("[MAIN] Čekám 1 vteřinu na ustálení robota před hledáním medvěda...");
-  // Resetujeme gyroskop na nulu před zahájením vyhledávání
-  man.mpu().resetAngleZ();
+  delay(1000);
+  calibrateGyro();
+  gyro_accumulated_offset = 0.0f;
+  resetGyroZ();
   delay(100); // Krátká pauza pro ustálení resetu
-  Serial.printf("[MAIN] Nulový úhel nastaven. Gyro Z před vyhledáváním = %.2f°\n", man.mpu().getAngleZ());
+  logMsg("[MAIN] Nulový úhel nastaven. Gyro Z před vyhledáváním (nulový stupeň) = %.2f°", getGyroAngleZ());
 
   // Spuštění plynulého vyhledávání medvěda
   int search_ticks = FindBear();
@@ -590,28 +727,38 @@ void setup()
       }
   }
 
+
   // Výpočet úhlu natočení podle enkodérů
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
   float search_angle_ticks = (search_ticks * 90.0f) / max_ticks_90;
   
   // Načtení úhlu z gyroskopu
-  float search_angle_raw = man.mpu().getAngleZ();
+  float search_angle_raw = getGyroAngleZ();
+
+  logMsg("[VÝPOČET GYROSKOPU - HLEDÁNÍ]");
+  logMsg("  - Hledání dokončeno, search_ticks = %d", search_ticks);
+  logMsg("  - max_ticks_90 = %d", max_ticks_90);
+  logMsg("  - Vypočtený úhel z enkodérů (search_angle_ticks) = %.2f°", search_angle_ticks);
+  logMsg("  - Raw úhel z gyroskopu (search_angle_raw) = %.2f°", search_angle_raw);
   
   // Detekce polarity gyroskopu vůči enkodérům (pouze pokud se robot reálně pohnul o více než 5 stupňů)
-  float gyro_polarity = 1.0f;
+  gyro_polarity = 1.0f;
   if (std::abs(search_angle_ticks) > 5.0f && std::abs(search_angle_raw) > 5.0f) {
       if ((search_angle_ticks > 0 && search_angle_raw < 0) || (search_angle_ticks < 0 && search_angle_raw > 0)) {
           gyro_polarity = -1.0f;
-          logMsg("[GYRO] ZJIŠTĚNA INVERZNÍ POLARITA GYROSKOPU. Nastavuji koeficient polarity na -1.0.");
+          logMsg("  - ZJIŠTĚNA INVERZNÍ POLARITA GYROSKOPU. Nastavuji koeficient polarity na -1.0.");
       } else {
           gyro_polarity = 1.0f;
-          logMsg("[GYRO] Polarita gyroskopu souhlasí s enkodéry (koeficient 1.0).");
+          logMsg("  - Polarita gyroskopu souhlasí s enkodéry (koeficient 1.0).");
       }
+  } else {
+      logMsg("  - Malý úhel natočení (ticks=%.2f°, raw=%.2f°). Používám výchozí koeficient polarity 1.0.", search_angle_ticks, search_angle_raw);
   }
   
-  float search_angle = search_angle_raw * gyro_polarity;
-  logMsg("[GYRO] Srovnaný úhel k medvědovi podle gyroskopu (korigovaný): Z = %.2f° (Raw: %.2f°, Ticks: %.2f°)", 
-                search_angle, search_angle_raw, search_angle_ticks);
+  float search_angle = first_search_angle;
+  gyro_bear_angle = search_angle;
+  logMsg("[GYRO] Srovnaný úhel k medvědovi: Gyro z prvního vyhledání (použito) = %.2f°, Ticks = %.2f° (Raw: %.2f°)", 
+                search_angle, search_angle_ticks, search_angle_raw);
 
   // Rozsvítit MODROU (a pro jistotu i zelenou) LED pro indikaci nalezení cíle
   man.leds().blue(true);
@@ -627,14 +774,9 @@ void setup()
   man.leds().blue(false);
   man.leds().green(false);
 
-  // Otevření klepet v závislosti na úhlu od stěn (rezerva 20 stupňů od krajů)
-  if (search_angle >= 20.0f && search_angle <= 140.0f) {
-      logMsg("[KLEPETA] Medvěd je v bezpečném úhlu (%.1f°). Otevírám klepeta naplno (Open)...", search_angle);
-      grabber.Open();
-  } else {
-      logMsg("[KLEPETA] Medvěd je blízko stěny (%.1f°). Otevírám klepeta pouze částečně (HalfOpen)...", search_angle);
-      grabber.HalfOpen();
-  }
+  // Otevření klepet pouze na polovinu (HalfOpen) podle nových pravidel
+  logMsg("[KLEPETA] Otevírám klepeta pouze částečně (HalfOpen)...");
+  grabber.HalfOpen();
   
   // Jízda pro medvěda:
   int y_target = message.y_distance;
@@ -694,8 +836,8 @@ void setup()
       } else {
           Serial.printf("[KLEPETA] Pokus %d o chycení selhal! Medvěd není v klepetech. IR1=%d, IR2=%d\n", grab_attempt, val1, val2);
           if (grab_attempt < 3) {
-              Serial.println("[KLEPETA] Otevírám klepeta a popojíždím 10 cm (100 mm) dopředu pro nový pokus...");
-              grabber.Open();
+              Serial.println("[KLEPETA] Otevírám klepeta (HalfOpen) a popojíždím 10 cm (100 mm) dopředu pro nový pokus...");
+              grabber.HalfOpen();
               delay(500);
               motors.forward_acc(100, 30);
           }
@@ -710,22 +852,37 @@ void setup()
   logMsg("[POHYB] Couvám 100 mm zpět s akcelerací pro uvolnění...");
   motors.backward_acc(100.0f, 30.0f);
 
-  // 2. Načteme aktuální orientaci robota PO odcouvání
-  float current_heading_raw = man.mpu().getAngleZ();
-  float current_heading = current_heading_raw * gyro_polarity;
+  // 2. Pro návrat a dotočení použijeme úhel z enkodérů (předpokládáme nulovou změnu úhlu při couvání rovně)
+  float current_heading = search_angle; // search_angle je z enkodérů
+  
+  float current_heading_raw_gyro = getGyroAngleZ();
+  float current_heading_gyro = current_heading_raw_gyro * gyro_polarity;
 
-  // 3. Dorovnání na cílový úhel pomocí gyroskopu
+  logMsg("[VÝPOČET ENKODÉRŮ - NAVRÁCENÍ]");
+  logMsg("  - Výchozí úhel nalezení medvěda z enkodérů (search_angle) = %.2f°", search_angle);
+  logMsg("  - Načtená raw orientace z gyroskopu po odcouvání (gyro_raw) = %.2f°", current_heading_raw_gyro);
+  logMsg("  - Korigovaný gyro úhel po odcouvání = %.2f°", current_heading_gyro);
+
+  // 3. Dorovnání na cílový úhel pomocí enkodérů
   // Pokud jsme medvěda našli za 90° (search_angle > 90°), cílíme na 80° (radši přetočit než nedotočit)
   // Jinak cílíme na 90°
   float target_angle = (search_angle > 90.0f) ? 80.0f : 90.0f;
   float remaining_angle = target_angle - current_heading;
   
+  logMsg("  - Cílový úhel (target_angle) = %.2f° (search_angle = %.1f°)", target_angle, search_angle);
+  logMsg("  - Rozdíl úhlů před normalizací (remaining_angle) = %.2f°", remaining_angle);
+
+  float orig_remaining = remaining_angle;
   // Wrap do [-180, 180]
   while (remaining_angle > 180.0f) remaining_angle -= 360.0f;
   while (remaining_angle < -180.0f) remaining_angle += 360.0f;
   
-  logMsg("[POHYB] Dorovnání na %.0f°: aktuální heading=%.2f° (raw=%.2f°), search_angle=%.1f°, zbývající otočení=%.2f°", 
-         target_angle, current_heading, current_heading_raw, search_angle, remaining_angle);
+  if (orig_remaining != remaining_angle) {
+      logMsg("  - Rozdíl úhlů po normalizaci (remaining_angle) = %.2f°", remaining_angle);
+  }
+  
+  logMsg("[POHYB] Dorovnání na %.0f°: heading z enkodérů=%.2f°, gyro heading=%.2f°, zbývající otočení=%.2f°", 
+         target_angle, current_heading, current_heading_gyro, remaining_angle);
   
   if (remaining_angle > 2.0f) {
       logMsg("[POHYB] Dotáčím se o %.1f° DOLEVA na %.0f°...", remaining_angle, target_angle);
@@ -736,6 +893,11 @@ void setup()
   } else {
       logMsg("[POHYB] Již jsme na %.0f° (odchylka %.2f°). Nepotřebuji se otáčet.", target_angle, remaining_angle);
   }
+  
+  float heading_after_rotation_raw = getGyroAngleZ();
+  float heading_after_rotation = heading_after_rotation_raw * gyro_polarity;
+  logMsg("  - Úhel z gyroskopu PO dotočení (raw): %.2f°", heading_after_rotation_raw);
+  logMsg("  - Korigovaný úhel PO dotočení: %.2f° (cíl byl %.0f°)", heading_after_rotation, target_angle);
   
   // 4. Couvání k pravé stěně pro srovnání
   logMsg("[POHYB] Couvám k pravé stěně bludiště pro srovnání...");
@@ -773,7 +935,7 @@ void loop(){
   if (millis() - last_loop_ir_print > 500) {
     int val1 = analogRead(IR_PIN_1);
     int val2 = analogRead(IR_PIN_2);
-    float angleZ = man.mpu().getAngleZ();
+    float angleZ = getGyroAngleZ();
     Serial.printf("[LOOP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f°\n", val1, val2, angleZ);
     last_loop_ir_print = millis();
   }
