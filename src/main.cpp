@@ -499,8 +499,6 @@ int FindBear() {
           delay(100);
           
           // Reset gyro a enkodéry
-          gyro_accumulated_offset = 0.0f;
-          gyro_reset_time = 0;
           resetGyroZ();
           gyro_angle_initial = getAbsoluteGyroAngleZ() * gyro_polarity;
           delay(100);
