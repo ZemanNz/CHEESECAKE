@@ -19,8 +19,9 @@ void logMsg(const char* format, ...) {
     logBuffer += "\n";
     Serial.println(temp);
 }
+#include <memory>
 #include "Grabber.hpp"
-std::unique_ptr<SmartServoBus> servoBus;
+std::unique_ptr<lx16a::SmartServoBus> servoBus;
 #include"Comunication.hpp"
 #include "Movement.hpp"
 #include "movement_my.hpp"
@@ -40,6 +41,8 @@ bool first_search_angle_saved = false;
 float gyro_angle_initial = 0.0f;
 float gyro_angle_bear_found = 0.0f;
 float gyro_angle_after_grab_back = 0.0f;
+
+bool any_function_executed = false;
 
 float getGyroAngleZ();
 float getAbsoluteGyroAngleZ();
@@ -315,7 +318,7 @@ void GoHome(bool skip_initial_alignment = false){
       Serial.println("[POHYB] GoHome: Couvám k PRAVÉ stěně pomocí back_buttons...");
       motors.back_buttons(75.0f, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
       
-      Serial.println("[POHYB] GoHome: Popojíždím 300 mm dopředu (doleva) od pravé stěny pro vytvoření druhého rádiusu...");
+      Serial.println("[POHYB] GoHome: Popojíždím 300 mm dopředu (doleva) od pravé stěny for vytvoření druhého rádiusu...");
       motors.forward_acc(300.0f, 40.0f);
   }
   Serial.println("[POHYB] GoHome: Dělám pravý oblouk (90 stupňů, poloměr 300 mm)...");
@@ -328,42 +331,6 @@ void GoHome(bool skip_initial_alignment = false){
   move.Straight(2000, 200, 99999);
 }
 
-//ceka na zmacknuti on tlacitka pak program pokracuje
-void WaitEorStart(){
-  uint32_t last_ir_print = 0;
-  while (true){
-    if (man.buttons().on() == 1){
-      break;
-    }
-    
-    if (millis() - last_ir_print > 500) {
-      int val1 = analogRead(IR_PIN_1);
-      int val2 = analogRead(IR_PIN_2);
-      uint32_t us1 = man.ultrasound(0).measure();
-      uint32_t us2 = man.ultrasound(1).measure();
-      Serial.printf("[IR SENSORS] GPIO 27 = %d, GPIO 14 = %d | US1 = %u mm, US2 = %u mm\n", val1, val2, us1, us2);
-      last_ir_print = millis();
-    }
-
-    // Debug zadních tlačítek / mikrospínačů
-    if (man.buttons().left() == 1 || man.buttons().right() == 1) {
-      Serial.printf("[TLACITKA] Stisknuto zadní tlačítko: Levý mikrospínač = %d, Pravý mikrospínač = %d\n", 
-                    man.buttons().left(), man.buttons().right());
-      delay(200); // Ochrana proti zaspamování konzole
-    }
-    if (man.buttons().up() == 1) {
-      Serial.printf("[TLACITKA] Stavy zadnich mikrospinacu: Levy = %d, Pravy = %d\n", 
-                    man.buttons().left(), man.buttons().right());
-      delay(200); // Ochrana proti zaspamování konzole
-    }
-    if (man.buttons().down() == 1) {
-      Serial.println("[TLACITKA] Stisknuto tlacitko DOWN -> Zavirame klepeta uplne (Close)");
-      grabber.Close();
-      delay(500); // Ochrana proti opakovanemu provedeni
-    }
-    delay(10);
-  }
-}
 
 //funkce pro otevirani grabberu po ceste do hriste
 void OpenGrabberBeforeField(){
@@ -490,7 +457,7 @@ int FindBear() {
           sweep_end_ticks = max_ticks_90 * 170 / 90;  // +170°
           
       } else {
-          // Pokus 2: Otočíme se na 90° DOLEVA a popojedeme 30 cm, pak 360°
+          // Pokus 2: Otočke se na 90° DOLEVA a popojedeme 30 cm, pak 360°
           Serial.println("[MAIN] 1. pokus selhal. Otáčím se na 90° DOLEVA a popojíždím 30 cm...");
           
           motors.turn_on_spot_left(90, 40.0f);
@@ -686,91 +653,420 @@ int FindBear() {
   Serial.println("[MAIN] Všechny pokusy o vyhledání medvěda selhaly.");
   return -9999;
 }
-void setup()
-{
-  Serial.begin(115200);
-  delay(500);
-  Serial.println("[MAIN] Robot se spouští. Inicializace RBCX...");
 
-  //pro fungovani RBCX (vypneme failsafe, protože vyhledávání blokuje na UART zprávách)
-  man.install(rb::MAN_DISABLE_MOTOR_FAILSAFE);
+// Otáčení na specifický absolutní úhel pomocí gyroskopu
+void turn_gyro_to_abs(float target_angle, float speed_pct) {
+    // Zastavení motorů a krátké ustálení
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    delay(200);
 
-  // Inicializace MPU (gyroskopu) s přesnou kalibrací driftu
-  calibrateGyro();
+    float max_speed = std::abs(speed_pct);
+    float min_speed = 10.0f;
+    float ramp_up_deg = 15.0f;
+    float ramp_down_deg = 20.0f;
+
+    Serial.printf("[GYRO ABS] Start otáčení na absolutní úhel %.1f stupňů...\n", target_angle);
+    int print_ctr = 0;
+    
+    // Zjistíme výchozí odchylku a směr otáčení
+    float start_angle = getGyroAngleZ();
+    float total_turn_dist = std::abs(target_angle - start_angle);
+    
+    // Pokud je rozdíl zanedbatelný, netočme se
+    if (total_turn_dist < 1.0f) {
+        Serial.println("[GYRO ABS] Robot je již natočen správně.");
+        return;
+    }
+
+    // Určíme směr:
+    // Pokud target_angle > start_angle, otáčíme se doleva (kladný směr)
+    // Pokud target_angle < start_angle, otáčíme se doprava (záporný směr)
+    bool turn_left = (target_angle > start_angle);
+
+    while (true) {
+        // Nouzové zastavení stiskem tlačítka DOWN
+        if (man.buttons().down() == 1) {
+            man.motor(rb::MotorId::M2).speed(0);
+            man.motor(rb::MotorId::M3).speed(0);
+            Serial.println("[GYRO ABS] EMERGENCY STOP!");
+            while (true) delay(100);
+        }
+
+        float current_angle = getGyroAngleZ();
+        float current_dist = std::abs(current_angle - start_angle);
+        float remaining_dist = std::abs(target_angle - current_angle);
+
+        // Podmínka ukončení:
+        if (turn_left) {
+            if (current_angle >= target_angle) break;
+        } else {
+            if (current_angle <= target_angle) break;
+        }
+
+        // Rozjezdová rampa
+        float speed_accel = max_speed;
+        if (current_dist < ramp_up_deg) {
+            float ratio = current_dist / ramp_up_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_accel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        // Brzdná rampa
+        float speed_decel = max_speed;
+        if (remaining_dist < ramp_down_deg) {
+            float ratio = remaining_dist / ramp_down_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_decel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        float speed = std::min(speed_accel, speed_decel);
+
+        if (turn_left) {
+            // Doleva na místě: levé kolo dozadu (speed), pravé kolo dopředu (speed)
+            man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed));
+            man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed));
+        } else {
+            // Doprava na místě: levé kolo dopředu (-speed), pravé kolo dozadu (-speed)
+            man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed));
+            man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed));
+        }
+
+        if (print_ctr++ % 10 == 0) {
+            Serial.printf("[GYRO ABS] Aktuální: %.2f°, Cíl: %.2f°, Rychlost: %.2f%%\n", current_angle, target_angle, speed);
+        }
+        delay(10);
+    }
+
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    Serial.printf("[GYRO ABS] Otočeno. Konečný úhel: %.2f°\n", getGyroAngleZ());
+}
+
+// Otáčení doprava pomocí gyroskopu
+void turn_gyro_right(float angle, float speed_pct) {
+    // Zastavení motorů a krátké ustálení
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    delay(200);
+
+    resetGyroZ();
+    delay(50);
+
+    float max_speed = std::abs(speed_pct);
+    float min_speed = 10.0f;
+    float ramp_up_deg = 15.0f;
+    float ramp_down_deg = 20.0f;
+
+    Serial.printf("[GYRO TURN] Start otáčení doprava o %.1f stupňů...\n", angle);
+    int print_ctr = 0;
+
+    // Otáčení doprava: relativní úhel getGyroAngleZ() klesá (záporné hodnoty)
+    while (getGyroAngleZ() > -angle) {
+        // Nouzové zastavení stiskem tlačítka DOWN
+        if (man.buttons().down() == 1) {
+            man.motor(rb::MotorId::M2).speed(0);
+            man.motor(rb::MotorId::M3).speed(0);
+            Serial.println("[GYRO TURN] EMERGENCY STOP!");
+            while (true) delay(100);
+        }
+
+        float current_angle = std::abs(getGyroAngleZ());
+        float error = angle - current_angle;
+        if (error < 0.0f) error = 0.0f;
+
+        // Rozjezdová rampa
+        float speed_accel = max_speed;
+        if (current_angle < ramp_up_deg) {
+            float ratio = current_angle / ramp_up_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_accel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        // Brzdná rampa
+        float speed_decel = max_speed;
+        if (error < ramp_down_deg) {
+            float ratio = error / ramp_down_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_decel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        float speed = std::min(speed_accel, speed_decel);
+
+        // Doprava na místě: levé kolo dopředu (-speed), pravé kolo dozadu (-speed)
+        man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed));
+        man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed));
+
+        if (print_ctr++ % 10 == 0) {
+            Serial.printf("[GYRO TURN R] Aktuální úhel: %.2f°, Cíl: %.2f°, Rychlost: %.2f%%\n", getGyroAngleZ(), -angle, speed);
+        }
+        delay(10);
+    }
+
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    Serial.printf("[GYRO TURN R] Otočeno doprava. Konečný úhel: %.2f°\n", getGyroAngleZ());
+}
+
+// Otáčení doleva pomocí gyroskopu
+void turn_gyro_left(float angle, float speed_pct) {
+    // Zastavení motorů a krátké ustálení
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    delay(200);
+
+    resetGyroZ();
+    delay(50);
+
+    float max_speed = std::abs(speed_pct);
+    float min_speed = 10.0f;
+    float ramp_up_deg = 15.0f;
+    float ramp_down_deg = 20.0f;
+
+    Serial.printf("[GYRO TURN] Start otáčení doleva o %.1f stupňů...\n", angle);
+    int print_ctr = 0;
+
+    // Otáčení doleva: relativní úhel getGyroAngleZ() roste (kladné hodnoty)
+    while (getGyroAngleZ() < angle) {
+        // Nouzové zastavení stiskem tlačítka DOWN
+        if (man.buttons().down() == 1) {
+            man.motor(rb::MotorId::M2).speed(0);
+            man.motor(rb::MotorId::M3).speed(0);
+            Serial.println("[GYRO TURN] EMERGENCY STOP!");
+            while (true) delay(100);
+        }
+
+        float current_angle = std::abs(getGyroAngleZ());
+        float error = angle - current_angle;
+        if (error < 0.0f) error = 0.0f;
+
+        // Rozjezdová rampa
+        float speed_accel = max_speed;
+        if (current_angle < ramp_up_deg) {
+            float ratio = current_angle / ramp_up_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_accel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        // Brzdná rampa
+        float speed_decel = max_speed;
+        if (error < ramp_down_deg) {
+            float ratio = error / ramp_down_deg;
+            if (ratio < 0.0f) ratio = 0.0f;
+            speed_decel = min_speed + (max_speed - min_speed) * ratio;
+        }
+
+        float speed = std::min(speed_accel, speed_decel);
+
+        // Doleva na místě: levé kolo dozadu (speed), pravé kolo dopředu (speed)
+        man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed));
+        man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed));
+
+        if (print_ctr++ % 10 == 0) {
+            Serial.printf("[GYRO TURN L] Aktuální úhel: %.2f°, Cíl: %.2f°, Rychlost: %.2f%%\n", getGyroAngleZ(), angle, speed);
+        }
+        delay(10);
+    }
+
+    man.motor(rb::MotorId::M2).speed(0);
+    man.motor(rb::MotorId::M3).speed(0);
+    Serial.printf("[GYRO TURN L] Otočeno doleva. Konečný úhel: %.2f°\n", getGyroAngleZ());
+}
+
+void roadside_leva() {
+  Serial.println("[ROADSIDE] Spouštím roadside_leva...");
+  // Obsah doplní uživatel
+}
+
+void roadside_prava() {
+  Serial.println("[ROADSIDE] Spouštím roadside_prava...");
+  
+  // Vynulování gyroskopu na startu sekvence
+  resetGyroZ();
+  delay(100);
+
+  motors.forward_acc(140, 15);
+  delay(200);
+  
+  // Otočení o 90 stupňů doprava pomocí absolutního gyroskopu
+  turn_gyro_to_abs(-88.0f, 30);
+  delay(200);
+  
+  // Uložení přesného absolutního úhlu po prvním dotočení
+  float target_truck_angle = getGyroAngleZ();
+  Serial.printf("[ROADSIDE] Uložen cílový úhel pro kamion: %.2f°\n", target_truck_angle);
+  
+  grabber.Open();
+  delay(1500);
+  
+  motors.forward_acc(700, 40);
+  delay(200);
+  
+  grabber.HalfOpen();
+  delay(2000);
+  
+  grabber.Open();
+  delay(1500);
+  
+  motors.forward_acc(70, 40);
+  delay(200);
+  
+  // Zatřepání (shaking): 10° doprava, 20° doleva a pak návrat přesně na cílový úhel (target_truck_angle)
+  turn_gyro_to_abs(target_truck_angle - 10.0f, 20);
+  delay(200);
+  turn_gyro_to_abs(target_truck_angle + 10.0f, 20);
+  delay(200);
+  turn_gyro_to_abs(target_truck_angle- 5, 20);
+  delay(200);
+  
+  grabber.HalfOpen();
+
+  turn_gyro_to_abs(target_truck_angle, 25);
+
+  delay(2000);
+ 
+  motors.forward_acc(400, 40);
+
+  delay(300);
+
+  turn_gyro_to_abs(-95, 27);
+  delay(200);
+
+
+  turn_gyro_to_abs(-90, 20);
+
+
+  motors.backward_acc(300,40);
+  delay(200);
+
+  turn_gyro_to_abs(-87, 20);
+  delay(200);
+
+  grabber.Grab();
+  delay(100);
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  motors.turn_on_spot_left(90,20);
+  
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+  delay(100);
+
+  // Vynulování gyroskopu na startu sekvence
   resetGyroZ();
 
-  // Inicializace infračervených senzorů jako ve Fotonovi
-  pinMode(IR_PIN_1, INPUT);
-  pinMode(IR_PIN_2, INPUT);
+  delay(3000);
 
-  Serial.println("[SERVOS] Inicializace SmartServoBus pres STM koprocesor...");
-  //parametry pro komunikaci se servy 
-  servoBus = std::make_unique<SmartServoBus>();
-  servoBus->begin(2, &man.smartServoBusBackend()); 
+  turn_gyro_to_abs(-45, 25);
 
-  servoBus->setAutoStop(0, false);//vypne autostop leveho serva 
-  servoBus->setAutoStop(1, false);//vypne autostop praveho serva
-  Serial.println("[SERVOS] Inicializace serv dokončena.");
+  delay(200);
+
+  motors.forward_acc(900, 40);
+
+  delay(200);
+
+  grabber.HalfOpen();
+
+  turn_gyro_to_abs(20, 25);
+
+  motors.forward_acc(550, 40);
   
-  // Zapneme komunikaci s RPi (na vyhrazenem Serial1)
-  Serial.println("[MAIN] Spouštím trvalou komunikaci s Raspberry Pi (Serial1)...");
-  message.start();
+  grabber.kamion();
+  delay(1000);
 
-  // Spustíme pozadový úkol pro odesílání gyroskopu na Raspberry Pi
-  xTaskCreate(gyro_sender_task, "gyro_sender_task", 2048, NULL, 1, NULL);
-  Serial.println("[MAIN] Pozadový úkol gyro_sender_task spuštěn.");
+  turn_gyro_to_abs(0,25);
 
-//po zapnuti ceka na zpravu od Raspberry Pi ze je ready
-//message.WaitForReadyMessage();
-  // Odblokování serva s kamerou ihned při startu
-  man.stupidServo(0).disable();
-  Serial.println("[MAIN] Servo s kamerou odblokováno.");
-  Serial.println("[MAIN] Čekám na výběr startu: UP (celá jízda), ON (jen vyhledávání), DOWN (zavřít klepeta)...");
+  motors.backward_acc(400,40);
+
+  delay(300);
+
+  turn_gyro_to_abs(0,25);
+
+
+  turn_gyro_to_abs(-90, 27);
+  delay(200);
+
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  motors.turn_on_spot_left(90,20);
   
-  bool run_entire_ride = false;
-  while(true){
-     if (man.buttons().up() == 1) {
-       logBuffer = "";
-       Serial.println("[TLACITKA] Tlačítko UP stisknuto! Startujeme celou jízdu...");
-       run_entire_ride = true;
-       break;
-     }
-     if (man.buttons().on() == 1) {
-       logBuffer = "";
-       Serial.println("[TLACITKA] Tlačítko ON stisknuto! Startujeme pouze vyhledávání...");
-       run_entire_ride = false;
-       break;
-     }
-    if (man.buttons().down() == 1) {
-      Serial.println("[TLACITKA] Tlačítko DOWN stisknuto -> Zavírám klepeta (Close)...");
-      grabber.Close();
-      delay(500); // Ochrana proti zaspamování, zůstáváme ve smyčce
-      Serial.println("[MAIN] Čekám na další výběr: UP, ON, DOWN...");
-    }
-    
-    // Debug zadních mikrospínačů během čekání
-    if (man.buttons().left() == 1 || man.buttons().right() == 1) {
-      Serial.printf("[TLACITKA] Stisknuto zadní tlačítko: Levý mikrospínač = %d, Pravý mikrospínač = %d\n", 
-                    man.buttons().left(), man.buttons().right());
-      delay(200);
-    }
-    
-    // Výpis IR senzorů a gyroskopu každých 500 ms pro diagnostiku před jízdou
-    static uint32_t last_setup_ir_print = 0;
-    if (millis() - last_setup_ir_print > 500) {
-      int val1 = analogRead(IR_PIN_1);
-      int val2 = analogRead(IR_PIN_2);
-      float angleZ = getGyroAngleZ();
-      uint32_t us1 = man.ultrasound(0).measure();
-      uint32_t us2 = man.ultrasound(1).measure();
-      Serial.printf("[SETUP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm\n", val1, val2, angleZ, us1, us2);
-      last_setup_ir_print = millis();
-    }
-    
-    delay(10);
-  }
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
   delay(100);
+
+  // Vynulování gyroskopu na startu sekvence
+  resetGyroZ();
+
+  delay(3000);
+
+
+ motors.forward_acc(340, 15);
+delay(200);
   
+  // Otočení o 90 stupňů doprava pomocí absolutního gyroskopu
+turn_gyro_to_abs(-88.0f, 30);
+delay(200);
+
+motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+motors.forward_acc(1280, 40);
+
+grabber.Open();
+delay(1500);
+
+
+
+ turn_gyro_to_abs(-84, 20);
+  delay(200);
+
+  grabber.Grab();
+  delay(100);
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  motors.turn_on_spot_left(90,20);
+  
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  delay(3000);
+
+  
+
+
+
+
+
+
+}
+
+void roadside_test() {
+  Serial.println("[ROADSIDE] Spouštím roadside_test...");
+  // Obsah doplní uživatel
+  man.motor(rb::MotorId::M2).setCurrentPosition(0);
+  man.motor(rb::MotorId::M3).setCurrentPosition(0);
+  int time = 0;
+  int ticks_M2 = 0;
+  int ticks_M3 = 0;
+  int timeout = 5000;
+  int speed = 2000;
+  while (time < timeout)
+  { 
+    man.motor(rb::MotorId::M2).speed(-speed);
+    man.motor(rb::MotorId::M3).speed(speed);
+    delay(10);
+    time = time + 10;
+    if(man.ultrasound(0).measure() < 300){
+        break;
+    }
+  }
+  man.motor(rb::MotorId::M2).speed(0);
+  man.motor(rb::MotorId::M3).speed(0);
+}
+
+
+void hledej_robota_konzervativni(bool run_entire_ride) {
+  open_grabber = false; // Resetujeme příznak otevírání pro případný opakovaný start
   if (run_entire_ride) {
       // 1. Cesta do hřiště (GoToField)
       Serial.println("[MAIN] Startuji jízdu do hřiště (GoToField)...");
@@ -961,6 +1257,108 @@ void setup()
   
   logMsg("[MAIN] Robot dojel domů. Konec programu.");
   man.leds().yellow(false);
+}
+
+void setup()
+{
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("[MAIN] Robot se spouští. Inicializace RBCX...");
+
+  //pro fungovani RBCX (vypneme failsafe, protože vyhledávání blokuje na UART zprávách)
+  man.install(rb::MAN_DISABLE_MOTOR_FAILSAFE);
+
+  // Inicializace MPU (gyroskopu) s přesnou kalibrací driftu
+  calibrateGyro();
+  resetGyroZ();
+
+  // Inicializace infračervených senzorů jako ve Fotonovi
+  pinMode(IR_PIN_1, INPUT);
+  pinMode(IR_PIN_2, INPUT);
+
+  Serial.println("[SERVOS] Inicializace SmartServoBus pres STM koprocesor...");
+  //parametry pro komunikaci se servy 
+  servoBus = std::make_unique<SmartServoBus>();
+  servoBus->begin(2, &man.smartServoBusBackend()); 
+
+  grabber.Init();
+  Serial.println("[SERVOS] Inicializace serv dokončena.");
+  
+  // Zapneme komunikaci s RPi (na vyhrazenem Serial1)
+  Serial.println("[MAIN] Spouštím trvalou komunikaci s Raspberry Pi (Serial1)...");
+  message.start();
+
+  // Spustíme pozadový úkol pro odesílání gyroskopu na Raspberry Pi
+  xTaskCreate(gyro_sender_task, "gyro_sender_task", 2048, NULL, 1, NULL);
+  Serial.println("[MAIN] Pozadový úkol gyro_sender_task spuštěn.");
+
+//po zapnuti ceka na zpravu od Raspberry Pi ze je ready
+//message.WaitForReadyMessage();
+  // Odblokování serva s kamerou ihned při startu
+  man.stupidServo(0).disable();
+  Serial.println("[MAIN] Servo s kamerou odblokováno.");
+  Serial.println("[MAIN] Čekám na výběr startu: UP (celá jízda), ON (jen vyhledávání), DOWN (zavřít klepeta)...");
+  
+  while(true){
+     if (man.buttons().up() == 1) {
+       logBuffer = "";
+       Serial.println("[TLACITKA] Tlačítko UP stisknuto! Startujeme celou jízdu...");
+       any_function_executed = true;
+       hledej_robota_konzervativni(true);
+       break;
+     }
+     if (man.buttons().on() == 1) {
+       logBuffer = "";
+       Serial.println("[TLACITKA] Tlačítko ON stisknuto! Startujeme pouze vyhledávání...");
+       any_function_executed = true;
+       hledej_robota_konzervativni(false);
+       break;
+     }
+    if (man.buttons().down() == 1) {
+      Serial.println("[TLACITKA] Tlačítko DOWN stisknuto -> Zavírám klepeta (Close)...");
+      grabber.Close();
+      delay(500); // Ochrana proti zaspamování, zůstáváme ve smyčce
+      Serial.println("[MAIN] Čekám na další výběr: UP, ON, DOWN...");
+    }
+    if (man.buttons().left() == 1) {
+      logBuffer = "";
+      Serial.println("[TLACITKA] Tlačítko LEFT stisknuto! Spouštím roadside_prava...");
+      any_function_executed = true;
+      roadside_prava();
+      break;
+    }
+    if (man.buttons().right() == 1) {
+      logBuffer = "";
+      Serial.println("[TLACITKA] Tlačítko RIGHT stisknuto! Spouštím roadside_leva...");
+      any_function_executed = true;
+      roadside_leva();
+      break;
+    }
+    if (man.buttons().off() == 1) {
+      if (!any_function_executed) {
+        logBuffer = "";
+        Serial.println("[TLACITKA] Tlačítko OFF stisknuto! Spouštím roadside_test...");
+        any_function_executed = true;
+        roadside_test();
+        break;
+      }
+    }
+    
+    // Výpis IR senzorů a gyroskopu každých 500 ms pro diagnostiku před jízdou
+    static uint32_t last_setup_ir_print = 0;
+    if (millis() - last_setup_ir_print > 500) {
+      int val1 = analogRead(IR_PIN_1);
+      int val2 = analogRead(IR_PIN_2);
+      float angleZ = getGyroAngleZ();
+      uint32_t us1 = man.ultrasound(0).measure();
+      uint32_t us2 = man.ultrasound(1).measure();
+      Serial.printf("[SETUP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm\n", val1, val2, angleZ, us1, us2);
+      last_setup_ir_print = millis();
+    }
+    
+    delay(10);
+  }
+  delay(100);
 }
 
 void loop(){
