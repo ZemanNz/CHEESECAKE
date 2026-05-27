@@ -43,6 +43,8 @@ float gyro_angle_bear_found = 0.0f;
 float gyro_angle_after_grab_back = 0.0f;
 
 bool any_function_executed = false;
+volatile bool g_run_running = false;
+
 
 float getGyroAngleZ();
 float getAbsoluteGyroAngleZ();
@@ -149,6 +151,27 @@ void gyro_sender_task(void *pvParameters) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
+
+void voltage_monitor_task(void *pvParameters) {
+    uint32_t last_log_time = 0;
+    while (true) {
+        if (g_run_running) {
+            uint32_t volt = man.battery().voltageMv();
+            uint32_t now = millis();
+            if (now - last_log_time >= 200) {
+                if (volt < 7100) {
+                    logMsg("[BATTERY ALERT] Nízké napětí / zátěž (pípání!): %u mV", volt);
+                } else {
+                    logMsg("[BATTERY] Napětí: %u mV", volt);
+                }
+                last_log_time = now;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+
 
 void calibrateGyro() {
     Serial.println("[GYRO] Inicializace MPU (gyroskopu)...");
@@ -875,7 +898,397 @@ void turn_gyro_left(float angle, float speed_pct) {
 
 void roadside_leva() {
   Serial.println("[ROADSIDE] Spouštím roadside_leva...");
-  // Obsah doplní uživatel
+  
+  // Vynulování gyroskopu na startu sekvence
+  resetGyroZ();
+  delay(100);
+
+  motors.forward_acc(140, 15);
+  delay(200);
+  
+  // Otočení o 90 stupňů doleva pomocí absolutního gyroskopu
+  turn_gyro_to_abs(88.0f, 30);
+  delay(200);
+  
+  // Uložení přesného absolutního úhlu po prvním dotočení
+  float target_truck_angle = getGyroAngleZ();
+  Serial.printf("[ROADSIDE] Uložen cílový úhel pro kamion: %.2f°\n", target_truck_angle);
+  
+  grabber.Open();
+  delay(1500);
+  
+  motors.forward_acc(700, 40);
+  delay(200);
+  
+  grabber.HalfOpen();
+  delay(2000);
+  
+  grabber.Open();
+  delay(1500);
+  
+  motors.forward_acc(70, 40);
+  delay(200);
+  
+  // Zatřepání (shaking): 10° doleva, 20° doprava a pak návrat přesně na cílový úhel (target_truck_angle)
+  turn_gyro_to_abs(target_truck_angle + 10.0f, 20);
+  delay(200);
+  turn_gyro_to_abs(target_truck_angle - 10.0f, 20);
+  delay(200);
+  turn_gyro_to_abs(target_truck_angle + 5, 20);
+  delay(200);
+  
+  grabber.HalfOpen();
+
+  turn_gyro_to_abs(target_truck_angle, 25);
+
+  delay(2000);
+ 
+  motors.forward_acc(400, 40);
+
+  delay(300);
+
+  turn_gyro_to_abs(95, 27);
+  delay(200);
+
+
+  turn_gyro_to_abs(90, 20);
+
+
+  motors.backward_acc(300,40);
+  delay(200);
+
+  turn_gyro_to_abs(87, 20);
+  delay(200);
+
+  grabber.Grab();
+  delay(100);
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  motors.turn_on_spot_right(90,20);
+  
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+  delay(100);
+
+  // Vynulování gyroskopu na startu sekvence
+resetGyroZ();
+
+  int start_mil = millis();
+  int obstacle_consec_count = 0;
+
+  while((millis() - start_mil) < 5000){
+    delay(200);
+    int vzdalenost = man.ultrasound(1).measure();
+    if(vzdalenost < 400 && vzdalenost > 10){
+        obstacle_consec_count++;
+        if (obstacle_consec_count >= 2) {
+            man.leds().yellow(true);
+            delay(200);
+            ESP.restart();
+        }
+    } else {
+        obstacle_consec_count = 0;
+    }
+
+  }
+
+  turn_gyro_to_abs(45, 25);
+
+  delay(200);
+
+  motors.forward_acc(900, 40);
+
+  delay(200);
+
+  grabber.HalfOpen();
+
+  turn_gyro_to_abs(-20, 25);
+
+  motors.forward_acc(550, 40);
+  
+  grabber.znacka(false);
+  delay(1200);
+
+  turn_gyro_to_abs(0,25);
+
+  motors.backward_acc(400,40);
+
+  delay(100);
+
+  motors.forward_acc(50, 40);
+
+  grabber.znacka(true);
+  delay(1200);
+
+  motors.backward_acc(230,40);
+
+  delay(300);
+
+
+  // Otočení s kontrolou timeoutu - pokud se dlouho nedaří otočit,
+  // značka asi blbě drží a kola jsou v luftu -> HalfOpen, zatřepání, znovu Grab
+  {
+    const float turn_target = 88;
+    const float turn_speed = 27;
+    const unsigned long turn_timeout_ms = 6000;
+    bool turn_ok = false;
+
+    for (int retry = 0; retry < 3; retry++) {
+      Serial.printf("[ROADSIDE] Pokus o otočení na %.0f° (pokus %d/3)...\n", turn_target, retry + 1);
+      
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+      delay(200);
+
+      float start_angle = getGyroAngleZ();
+      float total_turn_dist = std::abs(turn_target - start_angle);
+      
+      if (total_turn_dist < 1.0f) {
+        Serial.println("[ROADSIDE] Již natočen správně.");
+        turn_ok = true;
+        break;
+      }
+
+      bool turn_left = (turn_target > start_angle);
+      float max_spd = std::abs(turn_speed);
+      float min_spd = 10.0f;
+      unsigned long turn_start = millis();
+      bool timed_out = false;
+
+      while (true) {
+        if (man.buttons().down() == 1) {
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          Serial.println("[ROADSIDE] EMERGENCY STOP!");
+          while (true) delay(100);
+        }
+
+        float current_angle = getGyroAngleZ();
+        float current_dist = std::abs(current_angle - start_angle);
+        float remaining_dist = std::abs(turn_target - current_angle);
+
+        if (turn_left) {
+          if (current_angle >= turn_target) break;
+        } else {
+          if (current_angle <= turn_target) break;
+        }
+
+        // Kontrola timeoutu
+        if ((millis() - turn_start) > turn_timeout_ms) {
+          Serial.println("[ROADSIDE] TIMEOUT! Otočení trvá příliš dlouho - značka asi blbě drží.");
+          timed_out = true;
+          break;
+        }
+
+        float speed_accel = max_spd;
+        if (current_dist < 15.0f) {
+          float ratio = current_dist / 15.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_accel = min_spd + (max_spd - min_spd) * ratio;
+        }
+        float speed_decel = max_spd;
+        if (remaining_dist < 20.0f) {
+          float ratio = remaining_dist / 20.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_decel = min_spd + (max_spd - min_spd) * ratio;
+        }
+        float speed = std::min(speed_accel, speed_decel);
+
+        if (turn_left) {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed));
+        } else {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed));
+        }
+        delay(10);
+      }
+
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+
+      if (!timed_out) {
+        Serial.printf("[ROADSIDE] Otočení OK. Konečný úhel: %.2f°\n", getGyroAngleZ());
+        turn_ok = true;
+        break;
+      }
+
+      // Timeout - zkusíme přeuchytit značku
+      Serial.println("[ROADSIDE] Přeuchycení značky: HalfOpen -> zatřepání -> Grab...");
+      grabber.HalfOpen();
+      delay(500);
+      float cur = getGyroAngleZ();
+      turn_gyro_to_abs(cur + 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur - 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur, 20);
+      delay(200);
+      grabber.Grab();
+      delay(500);
+      Serial.println("[ROADSIDE] Značka přeuchycena, zkouším otočení znovu...");
+    }
+
+    if (!turn_ok) {
+      Serial.println("[ROADSIDE] WARN: Otočení se ani po 3 pokusech nepodařilo, pokračuji dál...");
+    }
+  }
+  delay(200);
+
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  delay(200);
+  resetGyroZ();
+  delay(500);
+
+  turn_gyro_to_abs(-90,25);
+  delay(200);
+
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  delay(100);
+
+  // Vynulování gyroskopu na startu sekvence
+  resetGyroZ();
+
+  delay(3000);
+
+
+ motors.forward_acc(340, 15);
+delay(200);
+  
+  // Otočení o 90 stupňů doleva pomocí absolutního gyroskopu
+turn_gyro_to_abs(88.0f, 30);
+delay(200);
+
+motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+motors.forward_acc(1240, 40);
+
+grabber.Open();
+delay(1500);
+
+// Kontrola u otáčení - timeout + retry (zrcadlově k roadside_prava)
+  {
+    const float turn_target2 = 84;
+    const float turn_speed2 = 20;
+    const unsigned long turn_timeout_ms2 = 6000;
+    bool turn_ok2 = false;
+
+    for (int retry = 0; retry < 3; retry++) {
+      Serial.printf("[ROADSIDE] Pokus o otočení na %.0f° (pokus %d/3)...\n", turn_target2, retry + 1);
+      
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+      delay(200);
+
+      float start_angle2 = getGyroAngleZ();
+      float total_turn_dist2 = std::abs(turn_target2 - start_angle2);
+      
+      if (total_turn_dist2 < 1.0f) {
+        Serial.println("[ROADSIDE] Již natočen správně.");
+        turn_ok2 = true;
+        break;
+      }
+
+      bool turn_left2 = (turn_target2 > start_angle2);
+      float max_spd2 = std::abs(turn_speed2);
+      float min_spd2 = 10.0f;
+      unsigned long turn_start2 = millis();
+      bool timed_out2 = false;
+
+      while (true) {
+        if (man.buttons().down() == 1) {
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          Serial.println("[ROADSIDE] EMERGENCY STOP!");
+          while (true) delay(100);
+        }
+
+        float current_angle2 = getGyroAngleZ();
+        float current_dist2 = std::abs(current_angle2 - start_angle2);
+        float remaining_dist2 = std::abs(turn_target2 - current_angle2);
+
+        if (turn_left2) {
+          if (current_angle2 >= turn_target2) break;
+        } else {
+          if (current_angle2 <= turn_target2) break;
+        }
+
+        if ((millis() - turn_start2) > turn_timeout_ms2) {
+          Serial.println("[ROADSIDE] TIMEOUT! Otočení trvá příliš dlouho - značka asi blbě drží.");
+          timed_out2 = true;
+          break;
+        }
+
+        float speed_accel2 = max_spd2;
+        if (current_dist2 < 15.0f) {
+          float ratio = current_dist2 / 15.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_accel2 = min_spd2 + (max_spd2 - min_spd2) * ratio;
+        }
+        float speed_decel2 = max_spd2;
+        if (remaining_dist2 < 20.0f) {
+          float ratio = remaining_dist2 / 20.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_decel2 = min_spd2 + (max_spd2 - min_spd2) * ratio;
+        }
+        float speed2 = std::min(speed_accel2, speed_decel2);
+
+        if (turn_left2) {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed2));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed2));
+        } else {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed2));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed2));
+        }
+        delay(10);
+      }
+
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+
+      if (!timed_out2) {
+        Serial.printf("[ROADSIDE] Otočení OK. Konečný úhel: %.2f°\n", getGyroAngleZ());
+        turn_ok2 = true;
+        break;
+      }
+
+      Serial.println("[ROADSIDE] Přeuchycení značky: HalfOpen -> zatřepání -> Grab...");
+      grabber.HalfOpen();
+      delay(500);
+      float cur2 = getGyroAngleZ();
+      turn_gyro_to_abs(cur2 + 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur2 - 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur2, 20);
+      delay(200);
+      grabber.Grab();
+      delay(500);
+      Serial.println("[ROADSIDE] Značka přeuchycena, zkouším otočení znovu...");
+    }
+
+    if (!turn_ok2) {
+      Serial.println("[ROADSIDE] WARN: Otočení se ani po 3 pokusech nepodařilo, pokračuji dál...");
+    }
+  }
+  delay(200);
+
+  grabber.Grab();
+  delay(100);
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  motors.forward_acc(400, 40);
+  motors.turn_on_spot_right(90,20);
+  
+  motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
+
+  delay(3000);
+
+  man.leds().yellow(false);
+
 }
 
 void roadside_prava() {
@@ -953,9 +1366,26 @@ void roadside_prava() {
   delay(100);
 
   // Vynulování gyroskopu na startu sekvence
-  resetGyroZ();
+resetGyroZ();
 
-  delay(3000);
+  int start_mil = millis();
+  int obstacle_consec_count = 0;
+
+  while((millis() - start_mil) < 5000){
+    delay(200);
+    int vzdalenost = man.ultrasound(1).measure();
+    if(vzdalenost < 400 && vzdalenost > 10){
+        obstacle_consec_count++;
+        if (obstacle_consec_count >= 2) {
+            man.leds().yellow(true);
+            delay(200);
+            ESP.restart();
+        }
+    } else {
+        obstacle_consec_count = 0;
+    }
+
+  }
 
   turn_gyro_to_abs(-45, 25);
 
@@ -971,26 +1401,145 @@ void roadside_prava() {
 
   motors.forward_acc(550, 40);
   
-  grabber.kamion();
-  delay(1000);
+  grabber.znacka(false);
+  delay(1200);
 
   turn_gyro_to_abs(0,25);
 
   motors.backward_acc(400,40);
 
+  delay(100);
+
+  motors.forward_acc(50, 40);
+
+  grabber.znacka(true);
+  delay(1200);
+
+  motors.backward_acc(230,40);
+
   delay(300);
 
-  turn_gyro_to_abs(0,25);
 
+  // Otočení s kontrolou timeoutu - pokud se dlouho nedaří otočit,
+  // značka asi blbě drží a kola jsou v luftu -> HalfOpen, zatřepání, znovu Grab
+  {
+    const float turn_target = -88;
+    const float turn_speed = 27;
+    const unsigned long turn_timeout_ms = 6000;
+    bool turn_ok = false;
 
-  turn_gyro_to_abs(-90, 27);
+    for (int retry = 0; retry < 3; retry++) {
+      Serial.printf("[ROADSIDE] Pokus o otočení na %.0f° (pokus %d/3)...\n", turn_target, retry + 1);
+      
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+      delay(200);
+
+      float start_angle = getGyroAngleZ();
+      float total_turn_dist = std::abs(turn_target - start_angle);
+      
+      if (total_turn_dist < 1.0f) {
+        Serial.println("[ROADSIDE] Již natočen správně.");
+        turn_ok = true;
+        break;
+      }
+
+      bool turn_left = (turn_target > start_angle);
+      float max_spd = std::abs(turn_speed);
+      float min_spd = 10.0f;
+      unsigned long turn_start = millis();
+      bool timed_out = false;
+
+      while (true) {
+        if (man.buttons().down() == 1) {
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          Serial.println("[ROADSIDE] EMERGENCY STOP!");
+          while (true) delay(100);
+        }
+
+        float current_angle = getGyroAngleZ();
+        float current_dist = std::abs(current_angle - start_angle);
+        float remaining_dist = std::abs(turn_target - current_angle);
+
+        if (turn_left) {
+          if (current_angle >= turn_target) break;
+        } else {
+          if (current_angle <= turn_target) break;
+        }
+
+        // Kontrola timeoutu
+        if ((millis() - turn_start) > turn_timeout_ms) {
+          Serial.println("[ROADSIDE] TIMEOUT! Otočení trvá příliš dlouho - značka asi blbě drží.");
+          timed_out = true;
+          break;
+        }
+
+        float speed_accel = max_spd;
+        if (current_dist < 15.0f) {
+          float ratio = current_dist / 15.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_accel = min_spd + (max_spd - min_spd) * ratio;
+        }
+        float speed_decel = max_spd;
+        if (remaining_dist < 20.0f) {
+          float ratio = remaining_dist / 20.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_decel = min_spd + (max_spd - min_spd) * ratio;
+        }
+        float speed = std::min(speed_accel, speed_decel);
+
+        if (turn_left) {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed));
+        } else {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed));
+        }
+        delay(10);
+      }
+
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+
+      if (!timed_out) {
+        Serial.printf("[ROADSIDE] Otočení OK. Konečný úhel: %.2f°\n", getGyroAngleZ());
+        turn_ok = true;
+        break;
+      }
+
+      // Timeout - zkusíme přeuchytit značku
+      Serial.println("[ROADSIDE] Přeuchycení značky: HalfOpen -> zatřepání -> Grab...");
+      grabber.HalfOpen();
+      delay(500);
+      float cur = getGyroAngleZ();
+      turn_gyro_to_abs(cur + 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur - 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur, 20);
+      delay(200);
+      grabber.Grab();
+      delay(500);
+      Serial.println("[ROADSIDE] Značka přeuchycena, zkouším otočení znovu...");
+    }
+
+    if (!turn_ok) {
+      Serial.println("[ROADSIDE] WARN: Otočení se ani po 3 pokusech nepodařilo, pokračuji dál...");
+    }
+  }
   delay(200);
 
   motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
 
   motors.forward_acc(400, 40);
-  motors.turn_on_spot_left(90,20);
-  
+  delay(200);
+  resetGyroZ();
+  delay(500);
+
+  turn_gyro_to_abs(90,25);
+  delay(200);
+
   motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
 
   delay(100);
@@ -1010,14 +1559,116 @@ delay(200);
 
 motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
 
-motors.forward_acc(1280, 40);
+motors.forward_acc(1240, 40);
 
 grabber.Open();
 delay(1500);
 
+// Kontrola u otáčení - timeout + retry
+  {
+    const float turn_target2 = -84;
+    const float turn_speed2 = 20;
+    const unsigned long turn_timeout_ms2 = 6000;
+    bool turn_ok2 = false;
 
+    for (int retry = 0; retry < 3; retry++) {
+      Serial.printf("[ROADSIDE] Pokus o otočení na %.0f° (pokus %d/3)...\n", turn_target2, retry + 1);
+      
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+      delay(200);
 
- turn_gyro_to_abs(-84, 20);
+      float start_angle2 = getGyroAngleZ();
+      float total_turn_dist2 = std::abs(turn_target2 - start_angle2);
+      
+      if (total_turn_dist2 < 1.0f) {
+        Serial.println("[ROADSIDE] Již natočen správně.");
+        turn_ok2 = true;
+        break;
+      }
+
+      bool turn_left2 = (turn_target2 > start_angle2);
+      float max_spd2 = std::abs(turn_speed2);
+      float min_spd2 = 10.0f;
+      unsigned long turn_start2 = millis();
+      bool timed_out2 = false;
+
+      while (true) {
+        if (man.buttons().down() == 1) {
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          Serial.println("[ROADSIDE] EMERGENCY STOP!");
+          while (true) delay(100);
+        }
+
+        float current_angle2 = getGyroAngleZ();
+        float current_dist2 = std::abs(current_angle2 - start_angle2);
+        float remaining_dist2 = std::abs(turn_target2 - current_angle2);
+
+        if (turn_left2) {
+          if (current_angle2 >= turn_target2) break;
+        } else {
+          if (current_angle2 <= turn_target2) break;
+        }
+
+        if ((millis() - turn_start2) > turn_timeout_ms2) {
+          Serial.println("[ROADSIDE] TIMEOUT! Otočení trvá příliš dlouho - značka asi blbě drží.");
+          timed_out2 = true;
+          break;
+        }
+
+        float speed_accel2 = max_spd2;
+        if (current_dist2 < 15.0f) {
+          float ratio = current_dist2 / 15.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_accel2 = min_spd2 + (max_spd2 - min_spd2) * ratio;
+        }
+        float speed_decel2 = max_spd2;
+        if (remaining_dist2 < 20.0f) {
+          float ratio = remaining_dist2 / 20.0f;
+          if (ratio < 0.0f) ratio = 0.0f;
+          speed_decel2 = min_spd2 + (max_spd2 - min_spd2) * ratio;
+        }
+        float speed2 = std::min(speed_accel2, speed_decel2);
+
+        if (turn_left2) {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(speed2));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(speed2));
+        } else {
+          man.motor(rb::MotorId::M2).speed(motors.pctToSpeed(-speed2));
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-speed2));
+        }
+        delay(10);
+      }
+
+      man.motor(rb::MotorId::M2).speed(0);
+      man.motor(rb::MotorId::M3).speed(0);
+
+      if (!timed_out2) {
+        Serial.printf("[ROADSIDE] Otočení OK. Konečný úhel: %.2f°\n", getGyroAngleZ());
+        turn_ok2 = true;
+        break;
+      }
+
+      Serial.println("[ROADSIDE] Přeuchycení značky: HalfOpen -> zatřepání -> Grab...");
+      grabber.HalfOpen();
+      delay(500);
+      float cur2 = getGyroAngleZ();
+      turn_gyro_to_abs(cur2 + 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur2 - 10.0f, 20);
+      delay(200);
+      turn_gyro_to_abs(cur2, 20);
+      delay(200);
+      grabber.Grab();
+      delay(500);
+      Serial.println("[ROADSIDE] Značka přeuchycena, zkouším otočení znovu...");
+    }
+
+    if (!turn_ok2) {
+      Serial.println("[ROADSIDE] WARN: Otočení se ani po 3 pokusech nepodařilo, pokračuji dál...");
+    }
+  }
   delay(200);
 
   grabber.Grab();
@@ -1031,12 +1682,7 @@ delay(1500);
 
   delay(3000);
 
-  
-
-
-
-
-
+  man.leds().yellow(false);
 
 }
 
@@ -1292,6 +1938,11 @@ void setup()
   xTaskCreate(gyro_sender_task, "gyro_sender_task", 2048, NULL, 1, NULL);
   Serial.println("[MAIN] Pozadový úkol gyro_sender_task spuštěn.");
 
+  // Spustíme pozadový úkol pro sledování napětí baterie (kvůli pípání)
+  xTaskCreate(voltage_monitor_task, "voltage_monitor_task", 2048, NULL, 1, NULL);
+  Serial.println("[MAIN] Pozadový úkol voltage_monitor_task spuštěn.");
+
+
 //po zapnuti ceka na zpravu od Raspberry Pi ze je ready
 //message.WaitForReadyMessage();
   // Odblokování serva s kamerou ihned při startu
@@ -1299,19 +1950,26 @@ void setup()
   Serial.println("[MAIN] Servo s kamerou odblokováno.");
   Serial.println("[MAIN] Čekám na výběr startu: UP (celá jízda), ON (jen vyhledávání), DOWN (zavřít klepeta)...");
   
+  man.leds().yellow(true); // Rozsvítit žlutou LED během výběru
   while(true){
      if (man.buttons().up() == 1) {
+       man.leds().yellow(false); // Zhasnout žlutou LED po výběru
        logBuffer = "";
        Serial.println("[TLACITKA] Tlačítko UP stisknuto! Startujeme celou jízdu...");
        any_function_executed = true;
+       g_run_running = true;
        hledej_robota_konzervativni(true);
+       g_run_running = false;
        break;
      }
      if (man.buttons().on() == 1) {
+       man.leds().yellow(false); // Zhasnout žlutou LED po výběru
        logBuffer = "";
        Serial.println("[TLACITKA] Tlačítko ON stisknuto! Startujeme pouze vyhledávání...");
        any_function_executed = true;
+       g_run_running = true;
        hledej_robota_konzervativni(false);
+       g_run_running = false;
        break;
      }
     if (man.buttons().down() == 1) {
@@ -1321,25 +1979,34 @@ void setup()
       Serial.println("[MAIN] Čekám na další výběr: UP, ON, DOWN...");
     }
     if (man.buttons().left() == 1) {
+      man.leds().yellow(false); // Zhasnout žlutou LED po výběru
       logBuffer = "";
       Serial.println("[TLACITKA] Tlačítko LEFT stisknuto! Spouštím roadside_prava...");
       any_function_executed = true;
+      g_run_running = true;
       roadside_prava();
+      g_run_running = false;
       break;
     }
     if (man.buttons().right() == 1) {
+      man.leds().yellow(false); // Zhasnout žlutou LED po výběru
       logBuffer = "";
       Serial.println("[TLACITKA] Tlačítko RIGHT stisknuto! Spouštím roadside_leva...");
       any_function_executed = true;
+      g_run_running = true;
       roadside_leva();
+      g_run_running = false;
       break;
     }
     if (man.buttons().off() == 1) {
       if (!any_function_executed) {
+        man.leds().yellow(false); // Zhasnout žlutou LED po výběru
         logBuffer = "";
         Serial.println("[TLACITKA] Tlačítko OFF stisknuto! Spouštím roadside_test...");
         any_function_executed = true;
+        g_run_running = true;
         roadside_test();
+        g_run_running = false;
         break;
       }
     }
@@ -1352,7 +2019,8 @@ void setup()
       float angleZ = getGyroAngleZ();
       uint32_t us1 = man.ultrasound(0).measure();
       uint32_t us2 = man.ultrasound(1).measure();
-      Serial.printf("[SETUP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm\n", val1, val2, angleZ, us1, us2);
+      uint32_t volt = man.battery().voltageMv();
+      Serial.printf("[SETUP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm | Batt = %u mV\n", val1, val2, angleZ, us1, us2, volt);
       last_setup_ir_print = millis();
     }
     
@@ -1388,7 +2056,8 @@ void loop(){
     float angleZ = getGyroAngleZ();
     uint32_t us1 = man.ultrasound(0).measure();
     uint32_t us2 = man.ultrasound(1).measure();
-    Serial.printf("[LOOP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm\n", val1, val2, angleZ, us1, us2);
+    uint32_t volt = man.battery().voltageMv();
+    Serial.printf("[LOOP] GPIO 27 = %d, GPIO 14 = %d | Gyro Z = %.2f° | US1 = %u mm, US2 = %u mm | Batt = %u mV\n", val1, val2, angleZ, us1, us2, volt);
     last_loop_ir_print = millis();
   }
   delay(10);

@@ -134,10 +134,17 @@ struct Grabber
     }
 
     // Nová funkce kamion - zavře na stejnou pozici jako Grab, ale s použitím SmartServoSoftMove
-    void kamion() {
+    void znacka(bool znovu) {
+        if(znovu){
+            SmartServoSoftMove(0, 90_deg); 
+        SmartServoSoftMove(1, RightAngle(85_deg)); 
+        last_state = grab;
+        }
+        else{
         SmartServoSoftMove(0, 86_deg); 
         SmartServoSoftMove(1, RightAngle(81_deg)); 
         last_state = grab;
+        }
     }
 };
 
