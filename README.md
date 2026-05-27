@@ -28,10 +28,10 @@ Před **každým** spuštěním zkontrolujte následující body:
 3.  👐 **Klepeta**: Zkontrolujte, zda se klepeta pohybují hladce a serva nejsou mechanicky blokována.
 4.  📦 **Uchycení baterie**: Ujistěte se, že baterie pevně drží v držáku a **netahá se po zemi**.
 5.  🔘 **Zadní tlačítka**: Otestujte zadní spínače pro detekci nárazu do stěny – musí volně pružit a spolehlivě spínat.
-6.  📡 **IR Senzory**: Očistěte přední optické IR senzory pro dojezd k medvědovi.
+6.  📡 **IR Senzory**: Zkontrolujte přední IR senzory. Ty slouží k detekci překážky přímo před robotem (reagují na to, že před ně něco položíte/hodíte).
 7.  🎯 **Nulování gyroskopu**: 
-    *   Při startu a kalibraci držte robota **naprosto v klidu**.
-    *   Při laborování na startovní pozici **často mačkejte tlačítko RESET** na RBCX, aby se gyroskop zkalibroval na správný nulový úhel.
+    *   Tlačítko **RESET** na RBCX stiskněte **pouze poté, co vložíte robota na startovní pozici**.
+    *   Při startu a kalibraci držte robota **naprosto v klidu**, aby se gyroskop správně zkalibroval na nulový úhel.
 
 ---
 
@@ -54,11 +54,11 @@ Pro správnou spolupráci s Raspberry Pi (zpracování obrazu z kamery):
 
 1.  🔌 **Powerbanka**: Plně nabijte powerbanku pro Raspberry Pi a propojte ji napájecím kabelem s Raspberry Pi.
 2.  📹 **Kamera a kabel**: 
-    *   Zkontrolujte správné natočení kamery (aby obraz nebyl vzhůru nohama nebo nakřivo).
+    *   Zkontrolujte správné nasměrování kamery (**musí mířit přímo dopředu robota**).
     *   Zkontrolujte zapojení propojovacího kabelu kamery. **Vždy mějte s sebou náhradní kabel!**
 3.  🚀 **Postup spuštění programu na Raspberry Pi**:
     *   Před spuštěním programu na Pi **zapněte hlavní spínač RBCX** (aby běžela komunikace).
-    *   Na Raspberry Pi přejděte do složky **Desktop** (Plocha) nebo **Documents** (Dokumenty).
+    *   Na Raspberry Pi přejděte na **Desktop** (Plochu) – skript se spouští pouze odtud.
     *   Poklepejte na soubor `main.py` -> otevře se vývojové prostředí **Thonny**.
     *   V horní liště Thonny klikněte na **červené/zelené tlačítko pro spuštění (Run / Start)**.
 4.  🛑 **Ukončení jízdy**:
