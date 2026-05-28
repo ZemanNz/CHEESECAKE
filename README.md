@@ -64,3 +64,28 @@ Pro správnou spolupráci s Raspberry Pi (zpracování obrazu z kamery):
 4.  🛑 **Ukončení jízdy**:
     *   Jakmile robot úspěšně dojede do cílového pole s medvědem, **ihned stiskněte tlačítko RESET** na RBCX.
     *   **Robot se sám na konci nezastaví** a zůstane stát se spuštěnými motory / v nekonečné smyčce.
+
+---
+
+## 📶 Připojení a nahrávání kódu do Raspberry Pi
+
+Pro úpravu kódu `main.py` nebo vzdálené ovládání Raspberry Pi se můžete připojit přes Wi-Fi a SSH:
+
+1. **Wi-Fi Síť (z Raspberry Pi)**:
+   * **SSID (Název)**: `Pi69`
+   * **Heslo**: `sokolska`
+
+2. **SSH Přihlášení**:
+   * **IP adresa**: `10.42.0.1`
+   * **Uživatel**: `notudes`
+   * **Heslo**: `notudes`
+   * **Příkaz pro připojení**:
+     ```bash
+     ssh notudes@10.42.0.1
+     ```
+
+3. **Kopírování souboru `main.py` na plochu (Desktop) Raspberry Pi**:
+   * Spusťte tento příkaz ze svého počítače ve složce projektu pro nahrání nejnovější verze kódu:
+     ```bash
+     scp main.py notudes@10.42.0.1:~/Desktop/
+     ```
