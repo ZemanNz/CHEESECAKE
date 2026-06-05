@@ -133,18 +133,82 @@ struct Grabber
         last_state = half_open;
     }
 
-    // Nová funkce kamion - zavře na stejnou pozici jako Grab, ale s použitím SmartServoSoftMove
+    // Funkce znacka - zavře obě serva (ID 1 na 94 stupňů, ID 0 na 91 stupňů soft movem)
     void znacka(bool znovu) {
-        if(znovu){
-            SmartServoSoftMove(0, 90_deg); 
-        SmartServoSoftMove(1, RightAngle(85_deg)); 
-        last_state = grab;
+        if (!servoBus) return;
+        
+        Serial.printf("[GRABBER] Volam znacka(znovu=%d): Levy (ID 0) -> 91°, Pravy (ID 1) -> 94°\n", znovu);
+        
+        // Nastavíme autostop parametry tak, aby byl soft-move více násilný (větší síla stisku, méně ochotný zastavit)
+        servoBus->setAutoStopParams(
+            SmartServoBus::AutoStopParams{
+                .max_diff_centideg = 2000, // Původně 1200 (povolíme ještě větší odchylku/sílu před stopem)
+                .max_diff_readings = 8,    // Původně 6 (vyžaduje ještě více po sobě jdoucích měření)
+            });
+        
+        // 1. Servo ID 1 (pravé klepeto) se zavře jako první na 94 stupňů
+        SmartServoMove(1, RightAngle(94_deg));
+        
+        // Čekáme na dojezd serva ID 1 do cílové pozice (dynamické vyčítání)
+        float target_deg = RightAngle(94_deg).deg();
+        uint32_t start_time = millis();
+        while (true) {
+            Angle p = servoBus->pos(1);
+            if (!p.isNaN() && std::abs(p.deg() - target_deg) < 2.5f) {
+                break;
+            }
+            // Timeout 1.5 sekundy pro případ zaseknutí nebo chyby komunikace
+            if (millis() - start_time > 1500) {
+                Serial.println("[GRABBER] Varovani: Cekani na pozici serva 1 prekrocilo timeout!");
+                break;
+            }
+            delay(15);
         }
-        else{
-        SmartServoSoftMove(0, 86_deg); 
-        SmartServoSoftMove(1, RightAngle(81_deg)); 
+        
+        // 2. Servo ID 0 (levé klepeto) se zavře jako druhé na 91 stupňů pomocí soft move
+        SmartServoSoftMove(0, 91_deg);
+        
         last_state = grab;
+    }
+
+    // Vypíše aktuální fyzické a logické pozice obou smart serv a uvolní jejich torque
+    void PrintAndRelease() {
+        if (!servoBus) {
+            Serial.println("[GRABBER] servoBus je NULL!");
+            return;
         }
+        
+        // Načtení pozic
+        Angle p0 = servoBus->pos(0);
+        Angle p1 = servoBus->pos(1);
+        
+        Serial.println("\n=== KALIBRACE CHYTRÝCH SERV (ZNAČKA) ===");
+        if (p0.isNaN()) {
+            Serial.println("Chyba: Nepodařilo se přečíst pozici Leva (ID 0)!");
+        } else {
+            Serial.printf("Levy (ID 0): Fyzicky = %.1f° | Logicky = %.1f°\n", p0.deg(), p0.deg());
+        }
+        
+        if (p1.isNaN()) {
+            Serial.println("Chyba: Nepodařilo se přečíst pozici Prava (ID 1)!");
+        } else {
+            // RightAngle(angle) = 240 - angle  => angle = 240 - RightAngle(angle)
+            float log1 = 240.0f - p1.deg();
+            Serial.printf("Pravy (ID 1): Fyzicky = %.1f° | Logicky = %.1f°\n", p1.deg(), log1);
+        }
+        
+        if (!p0.isNaN() && !p1.isNaN()) {
+            float log1 = 240.0f - p1.deg();
+            Serial.println("\nNávrh kódu pro funkci znacka():");
+            Serial.printf("SmartServoSoftMove(0, %.0f_deg);\n", p0.deg());
+            Serial.printf("SmartServoSoftMove(1, RightAngle(%.0f_deg));\n", log1);
+        }
+        Serial.println("=========================================\n");
+        
+        // Uvolnění točivého momentu (torque OFF)
+        rb::Manager::get().smartServoBusBackend().send(lw::Packet(0, lw::Command::SERVO_LOAD_OR_UNLOAD_WRITE, (uint8_t)0));
+        rb::Manager::get().smartServoBusBackend().send(lw::Packet(1, lw::Command::SERVO_LOAD_OR_UNLOAD_WRITE, (uint8_t)0));
+        Serial.println("[GRABBER] Serva uvolněna (torque OFF). Nyní je můžete ručně otočit.");
     }
 };
 
