@@ -399,21 +399,85 @@ int FindBear() {
       float current_back_speed = search_speed_back;
 
       if (attempt == 1) {
-          // Pokus 1: Otočíme se 30° DOLEVA bez detekce a pak zametáme (Rozsah +30° až +180°)
-          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah +30° až +180°");
+          // Pokus 1: Otočíme se 30° DOLEVA a pak zametáme (Rozsah +30° až +170°)
+          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah +30° až +170°");
           
-          Serial.println("[MAIN] Otáčím se rychle 30° DOLEVA bez detekce...");
-          motors.turn_on_spot_left(30, 40.0f);
-          delay(100);
+          Serial.println("[MAIN] Otáčím se pomalu 30° DOLEVA pouze pravým kolem (s detekcí)...");
+          resetGyroZ();
           
           // Vyčistíme předchozí zprávy, abychom nereagovali na stará/stojící data
           message.clearRxBuffer();
+          
+          // Pravé kolo jede dopředu (speed = 4%), levé stojí (speed = 0)
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(4));
+          
+          uint32_t pre_turn_send_time = 0;
+          bool bear_found_pre_turn = false;
+          
+          while (std::abs(getGyroAngleZ()) < 30.0f) {
+              // Posíláme inposition do RPi
+              if (millis() - pre_turn_send_time > 100) {
+                  message.SendInPosstionMessage();
+                  pre_turn_send_time = millis();
+              }
+              
+              // Zpracování zpráv z RPi
+              if (message.receiveMessage()) {
+                  if (message.msg.x != 0 || message.msg.y != 0 || message.msg.distance != 0) {
+                      int x = message.x_distance;
+                      int y = message.y_distance;
+                      
+                      Serial.printf("[PRE-TURN RX] Nalezen medvěd během počátečního otáčení: x=%d mm, y=%d mm\n", x, y);
+                      
+                      if (std::abs(x) <= centered_threshold) {
+                          centered_consecutive_count++;
+                          if (centered_consecutive_count >= target_consecutive_confirmations) {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(0);
+                              Serial.printf("[PRE-TURN] Medvěd vycentrován a potvrzen! x=%d, y=%d\n", x, y);
+                              bear_found_pre_turn = true;
+                              break;
+                          }
+                      } else {
+                          centered_consecutive_count = 0;
+                          // Jemná korekce směru
+                          if (x > 0) {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-min_speed));
+                          } else {
+                              man.motor(rb::MotorId::M2).speed(0);
+                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(min_speed));
+                          }
+                      }
+                  }
+              }
+              delay(10);
+          }
+          
+          man.motor(rb::MotorId::M2).speed(0);
+          man.motor(rb::MotorId::M3).speed(0);
+          
+          if (bear_found_pre_turn) {
+              int current_ticks = 0;
+              man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
+                  current_ticks = info.position();
+              });
+              delay(100);
+              if (!first_search_angle_saved) {
+                  first_search_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
+                  first_search_angle_saved = true;
+                  gyro_angle_bear_found = first_search_angle;
+                  Serial.printf("[GYRO SAVED] Ukládám první úhel nalezení (v pre-turnu): %.2f°\n", first_search_angle);
+              }
+              return current_ticks;
+          }
           
           // Nastavíme enkodér na ticks_30 (jsme nyní na 30°)
           man.motor(rb::MotorId::M3).setCurrentPosition(ticks_30);
           
           sweep_start_ticks = 0;                      // 0° (pro návrat)
-          sweep_end_ticks = max_ticks_90 * 180 / 90;  // +180°
+          sweep_end_ticks = max_ticks_90 * 170 / 90;  // +170°
           
       } else {
           // Pokus 2: Otočke se na 90° DOLEVA a popojedeme 30 cm, pak 360°
@@ -850,19 +914,31 @@ void roadside_leva() {
   float target_truck_angle = getGyroAngleZ();
   Serial.printf("[ROADSIDE] Uložen cílový úhel pro kamion: %.2f°\n", target_truck_angle);
   
-  grabber.Open();
+  // Otevření na half open + 5 stupňů (tj. 40 stupňů) s ochranou proti kolizi
+  grabber.SmartServoMove(0, 40_deg);
+  if (grabber.last_state == Grabber::closed) {
+      delay(1000);
+  }
+  grabber.SmartServoMove(1, grabber.RightAngle(40_deg));
+  grabber.last_state = Grabber::half_open;
   delay(1500);
   
-  motors.forward_acc(700, 40);
+  motors.forward_acc(700 + 50, 40); // Popojedeme dál o 50 mm (původně 700)
   delay(200);
   
   grabber.HalfOpen();
   delay(2000);
   
-  grabber.Open();
+  // Otevření na half open + 5 stupňů (tj. 40 stupňů)
+  grabber.SmartServoMove(0, 40_deg);
+  if (grabber.last_state == Grabber::closed) {
+      delay(1000);
+  }
+  grabber.SmartServoMove(1, grabber.RightAngle(40_deg));
+  grabber.last_state = Grabber::half_open;
   delay(1500);
   
-  motors.forward_acc(70, 40);
+  motors.forward_acc(70 - 50, 40); // Odečteno 50 mm od druhého popojezdu (původně 70)
   delay(200);
   
   // Zatřepání (shaking): 10° doleva, 20° doprava a pak návrat přesně na cílový úhel (target_truck_angle)
@@ -879,8 +955,7 @@ void roadside_leva() {
 
   delay(2000);
  
-  motors.forward_acc(400, 40);
-
+  motors.forward_acc(400 + 50, 40); // Poptlačení kamionu zvětšeno o 50 mm (původně 400)
   delay(300);
 
   turn_gyro_to_abs(95, 27);
@@ -932,8 +1007,7 @@ resetGyroZ();
 
   delay(200);
 
-  motors.forward_acc(900, 40);
-
+  motors.forward_acc(900 + 100, 40); // Zvětšeno o 100 mm (10 cm) před položením značek u náklaďáku
   delay(200);
 
   grabber.HalfOpen();
@@ -1245,19 +1319,31 @@ void roadside_prava() {
   float target_truck_angle = getGyroAngleZ();
   Serial.printf("[ROADSIDE] Uložen cílový úhel pro kamion: %.2f°\n", target_truck_angle);
   
-  grabber.Open();
+  // Otevření na half open + 5 stupňů (tj. 40 stupňů) s ochranou proti kolizi
+  grabber.SmartServoMove(0, 40_deg);
+  if (grabber.last_state == Grabber::closed) {
+      delay(1000);
+  }
+  grabber.SmartServoMove(1, grabber.RightAngle(40_deg));
+  grabber.last_state = Grabber::half_open;
   delay(1500);
   
-  motors.forward_acc(700, 40);
+  motors.forward_acc(700 + 50, 40); // Popojedeme dál o 50 mm (původně 700)
   delay(200);
   
   grabber.HalfOpen();
   delay(2000);
   
-  grabber.Open();
+  // Otevření na half open + 5 stupňů (tj. 40 stupňů)
+  grabber.SmartServoMove(0, 40_deg);
+  if (grabber.last_state == Grabber::closed) {
+      delay(1000);
+  }
+  grabber.SmartServoMove(1, grabber.RightAngle(40_deg));
+  grabber.last_state = Grabber::half_open;
   delay(1500);
   
-  motors.forward_acc(70, 40);
+  motors.forward_acc(70 - 50, 40); // Odečteno 50 mm od druhého popojezdu (původně 70)
   delay(200);
   
   // Zatřepání (shaking): 10° doprava, 20° doleva a pak návrat přesně na cílový úhel (target_truck_angle)
@@ -1274,8 +1360,7 @@ void roadside_prava() {
 
   delay(2000);
  
-  motors.forward_acc(400, 40);
-
+  motors.forward_acc(400 + 50, 40); // Poptlačení kamionu zvětšeno o 50 mm (původně 400)
   delay(300);
 
   turn_gyro_to_abs(-95, 27);
@@ -1327,8 +1412,7 @@ resetGyroZ();
 
   delay(200);
 
-  motors.forward_acc(900, 40);
-
+  motors.forward_acc(900 + 100, 40); // Zvětšeno o 100 mm (10 cm) před položením značek u náklaďáku
   delay(200);
 
   grabber.HalfOpen();
