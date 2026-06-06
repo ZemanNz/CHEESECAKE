@@ -389,7 +389,7 @@ int FindBear() {
   gyro_angle_after_grab_back = 0.0f;
   
   const int max_ticks_90 = (M_PI * move.wheel_base) / (2.0 * move.mm_to_ticks);
-  const int ticks_10 = max_ticks_90 * 10 / 90;
+  const int ticks_30 = max_ticks_90 * 30 / 90;
   
   for (int attempt = 1; attempt <= 2; attempt++) {
       // === PŘÍPRAVA POZICE PŘED ZAMETÁNÍM ===
@@ -399,85 +399,21 @@ int FindBear() {
       float current_back_speed = search_speed_back;
 
       if (attempt == 1) {
-          // Pokus 1: Otočíme se 10° doprava a pak zametáme 180° doleva (-10° až +170°)
-          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah -10° až +170°");
+          // Pokus 1: Otočíme se 30° DOLEVA bez detekce a pak zametáme (Rozsah +30° až +180°)
+          Serial.println("[MAIN] Hledání medvěda - 1. pokus: Rozsah +30° až +180°");
           
-          Serial.println("[MAIN] Otáčím se pomalu 10° DOPRAVA pouze pravým kolem (s detekcí)...");
-          resetGyroZ();
+          Serial.println("[MAIN] Otáčím se rychle 30° DOLEVA bez detekce...");
+          motors.turn_on_spot_left(30, 40.0f);
+          delay(100);
           
           // Vyčistíme předchozí zprávy, abychom nereagovali na stará/stojící data
           message.clearRxBuffer();
           
-          // Pravé kolo jede dozadu (speed = -4%), levé stojí (speed = 0)
-          man.motor(rb::MotorId::M2).speed(0);
-          man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-4));
+          // Nastavíme enkodér na ticks_30 (jsme nyní na 30°)
+          man.motor(rb::MotorId::M3).setCurrentPosition(ticks_30);
           
-          uint32_t pre_turn_send_time = 0;
-          bool bear_found_pre_turn = false;
-          
-          while (std::abs(getGyroAngleZ()) < 10.0f) {
-              // Posíláme inposition do RPi
-              if (millis() - pre_turn_send_time > 100) {
-                  message.SendInPosstionMessage();
-                  pre_turn_send_time = millis();
-              }
-              
-              // Zpracování zpráv z RPi
-              if (message.receiveMessage()) {
-                  if (message.msg.x != 0 || message.msg.y != 0 || message.msg.distance != 0) {
-                      int x = message.x_distance;
-                      int y = message.y_distance;
-                      
-                      Serial.printf("[PRE-TURN RX] Nalezen medvěd během počátečního otáčení: x=%d mm, y=%d mm\n", x, y);
-                      
-                      if (std::abs(x) <= centered_threshold) {
-                          centered_consecutive_count++;
-                          if (centered_consecutive_count >= target_consecutive_confirmations) {
-                              man.motor(rb::MotorId::M2).speed(0);
-                              man.motor(rb::MotorId::M3).speed(0);
-                              Serial.printf("[PRE-TURN] Medvěd vycentrován a potvrzen! x=%d, y=%d\n", x, y);
-                              bear_found_pre_turn = true;
-                              break;
-                          }
-                      } else {
-                          centered_consecutive_count = 0;
-                          // Jemná korekce směru
-                          if (x > 0) {
-                              man.motor(rb::MotorId::M2).speed(0);
-                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(-min_speed));
-                          } else {
-                              man.motor(rb::MotorId::M2).speed(0);
-                              man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(min_speed));
-                          }
-                      }
-                  }
-              }
-              delay(10);
-          }
-          
-          man.motor(rb::MotorId::M2).speed(0);
-          man.motor(rb::MotorId::M3).speed(0);
-          
-          if (bear_found_pre_turn) {
-              int current_ticks = 0;
-              man.motor(rb::MotorId::M3).requestInfo([&current_ticks](rb::Motor &info) {
-                  current_ticks = info.position();
-              });
-              delay(100);
-              if (!first_search_angle_saved) {
-                  first_search_angle = getAbsoluteGyroAngleZ() * gyro_polarity;
-                  first_search_angle_saved = true;
-                  gyro_angle_bear_found = first_search_angle;
-                  Serial.printf("[GYRO SAVED] Ukládám první úhel nalezení (v pre-turnu): %.2f°\n", first_search_angle);
-              }
-              return current_ticks;
-          }
-          
-          // Nastavíme enkodér na -ticks_10 (jsme nyní na -10°)
-          man.motor(rb::MotorId::M3).setCurrentPosition(-ticks_10);
-          
-          sweep_start_ticks = -ticks_10;              // -10°
-          sweep_end_ticks = max_ticks_90 * 170 / 90;  // +170°
+          sweep_start_ticks = 0;                      // 0° (pro návrat)
+          sweep_end_ticks = max_ticks_90 * 180 / 90;  // +180°
           
       } else {
           // Pokus 2: Otočke se na 90° DOLEVA a popojedeme 30 cm, pak 360°
@@ -508,7 +444,7 @@ int FindBear() {
       man.motor(rb::MotorId::M2).speed(0);
       man.motor(rb::MotorId::M3).speed(motors.pctToSpeed(current_forward_speed));
       
-      int current_ticks = (attempt == 1) ? -ticks_10 : 0;
+      int current_ticks = (attempt == 1) ? ticks_30 : 0;
       uint32_t last_send_time = 0;
       uint32_t last_info_time = 0;
       uint32_t last_bear_seen_time = millis();
