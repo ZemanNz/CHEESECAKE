@@ -133,42 +133,19 @@ struct Grabber
         last_state = half_open;
     }
 
-    // Funkce znacka - zavře obě serva (ID 1 na 94 stupňů, ID 0 na 91 stupňů soft movem)
     void znacka(bool znovu) {
         if (!servoBus) return;
         
-        Serial.printf("[GRABBER] Volam znacka(znovu=%d): Levy (ID 0) -> 91°, Pravy (ID 1) -> 94°\n", znovu);
-        
-        // Nastavíme autostop parametry tak, aby byl soft-move více násilný (větší síla stisku, méně ochotný zastavit)
-        servoBus->setAutoStopParams(
-            SmartServoBus::AutoStopParams{
-                .max_diff_centideg = 2000, // Původně 1200 (povolíme ještě větší odchylku/sílu před stopem)
-                .max_diff_readings = 8,    // Původně 6 (vyžaduje ještě více po sobě jdoucích měření)
-            });
-        
-        // 1. Servo ID 1 (pravé klepeto) se zavře jako první na 94 stupňů
-        SmartServoMove(1, RightAngle(94_deg));
-        
-        // Čekáme na dojezd serva ID 1 do cílové pozice (dynamické vyčítání)
-        float target_deg = RightAngle(94_deg).deg();
-        uint32_t start_time = millis();
-        while (true) {
-            Angle p = servoBus->pos(1);
-            if (!p.isNaN() && std::abs(p.deg() - target_deg) < 2.5f) {
-                break;
-            }
-            // Timeout 1.5 sekundy pro případ zaseknutí nebo chyby komunikace
-            if (millis() - start_time > 1500) {
-                Serial.println("[GRABBER] Varovani: Cekani na pozici serva 1 prekrocilo timeout!");
-                break;
-            }
-            delay(15);
+        if(znovu){
+            SmartServoSoftMove(0, 90_deg); 
+            SmartServoSoftMove(1, RightAngle(85_deg)); 
+            last_state = grab;
         }
-        
-        // 2. Servo ID 0 (levé klepeto) se zavře jako druhé na 91 stupňů pomocí soft move
-        SmartServoSoftMove(0, 91_deg);
-        
-        last_state = grab;
+        else{
+            SmartServoSoftMove(0, 86_deg); 
+            SmartServoSoftMove(1, RightAngle(81_deg)); 
+            last_state = grab;
+        }
     }
 
     // Vypíše aktuální fyzické a logické pozice obou smart serv a uvolní jejich torque

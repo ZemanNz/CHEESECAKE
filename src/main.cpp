@@ -958,11 +958,14 @@ void roadside_leva() {
   motors.forward_acc(400 + 50, 40); // Poptlačení kamionu zvětšeno o 50 mm (původně 400)
   delay(300);
 
-  turn_gyro_to_abs(95, 27);
+  delay(300);
+
+   grabber.Open();
+
+  delay(500);
+
+  motors.forward_acc(80,70);
   delay(200);
-
-
-  turn_gyro_to_abs(90, 20);
 
 
   motors.backward_acc(300,40);
@@ -1174,10 +1177,14 @@ delay(200);
 
 motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
 
-motors.forward_acc(1240, 40);
+motors.forward_acc(1340, 40);
 
 grabber.Open();
 delay(1500);
+
+motors.forward_acc(80,70);
+
+delay(1000);
 
 // Kontrola u otáčení - timeout + retry (zrcadlově k roadside_prava)
   {
@@ -1286,6 +1293,8 @@ delay(1500);
   }
   delay(200);
 
+  
+
   grabber.Grab();
   delay(100);
   motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
@@ -1342,8 +1351,8 @@ void roadside_prava() {
   grabber.SmartServoMove(1, grabber.RightAngle(40_deg));
   grabber.last_state = Grabber::half_open;
   delay(1500);
-  
-  motors.forward_acc(70 - 50, 40); // Odečteno 50 mm od druhého popojezdu (původně 70)
+ 
+  motors.forward_acc(70 - 10, 40); // Odečteno 50 mm od druhého popojezdu (původně 70)
   delay(200);
   
   // Zatřepání (shaking): 10° doprava, 20° doleva a pak návrat přesně na cílový úhel (target_truck_angle)
@@ -1363,11 +1372,11 @@ void roadside_prava() {
   motors.forward_acc(400 + 50, 40); // Poptlačení kamionu zvětšeno o 50 mm (původně 400)
   delay(300);
 
-  turn_gyro_to_abs(-95, 27);
-  delay(200);
+   grabber.Open();
 
+  delay(500);
 
-  turn_gyro_to_abs(-90, 20);
+  motors.forward_acc(80,70);
 
 
   motors.backward_acc(300,40);
@@ -1579,11 +1588,14 @@ delay(200);
 
 motors.back_buttons(60, [](){ return man.buttons().left() == 1; }, [](){ return man.buttons().right() == 1; });
 
-motors.forward_acc(1240, 40);
+motors.forward_acc(1340, 40);
 
 grabber.Open();
 delay(1500);
 
+motors.forward_acc(80,70);
+
+delay(1000);
 // Kontrola u otáčení - timeout + retry
   {
     const float turn_target2 = -84;
